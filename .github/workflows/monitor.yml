@@ -3,7 +3,8 @@ name: Monitor booking availability
 on:
   schedule:
     # Every 15 minutes, offset from the top of the hour to reduce scheduler load.
-    - cron: "7,22,37,52 * * * *"
+    # - cron: "7,22,37,52 * * * *"
+    - cron: "7,11,13,16,19,21,22,37,52 * * * *"
   workflow_dispatch:
     inputs:
       send_test_notification:
