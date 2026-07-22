@@ -5,6 +5,12 @@ on:
     # Every 15 minutes, offset from the top of the hour to reduce scheduler load.
     - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
+    inputs:
+      send_test_notification:
+        description: "Send an ntfy test notification instead of checking the calendar"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -33,9 +39,19 @@ jobs:
         run: npm ci
 
       - name: Install Chromium
+        if: ${{ !inputs.send_test_notification }}
         run: npx playwright install --with-deps chromium
 
+      - name: Send ntfy test notification
+        if: ${{ inputs.send_test_notification }}
+        env:
+          BOOKING_URL: https://tecomel-traveltotaiwan.youcanbook.me/
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_BASE_URL: ${{ vars.NTFY_BASE_URL }}
+        run: npm run notify:test
+
       - name: Restore previous monitor state
+        if: ${{ !inputs.send_test_notification }}
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -50,6 +66,7 @@ jobs:
           fi
 
       - name: Check availability and notify
+        if: ${{ !inputs.send_test_notification }}
         env:
           BOOKING_URL: https://tecomel-traveltotaiwan.youcanbook.me/
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
@@ -59,7 +76,7 @@ jobs:
         run: npm run check
 
       - name: Save monitor state
-        if: ${{ always() && hashFiles('.state/availability.json') != '' }}
+        if: ${{ always() && !inputs.send_test_notification && hashFiles('.state/availability.json') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: availability-state
