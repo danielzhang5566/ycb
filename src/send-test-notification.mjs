@@ -13,16 +13,19 @@ if (!topic) {
   );
 }
 
-const response = await fetch(`${baseUrl}/${encodeURIComponent(topic)}`, {
+const response = await fetch(baseUrl, {
   method: "POST",
   headers: {
-    "Content-Type": "text/plain; charset=utf-8",
-    Title: "预约监控测试通知",
-    Priority: "default",
-    Tags: "white_check_mark,calendar",
-    Click: bookingUrl,
+    "Content-Type": "application/json; charset=utf-8",
   },
-  body: "测试成功：GitHub Actions 已经可以向 ntfy 发送预约监控通知。",
+  body: JSON.stringify({
+    topic,
+    title: "预约监控测试通知",
+    message: "测试成功：GitHub Actions 已经可以向 ntfy 发送预约监控通知。",
+    priority: 3,
+    tags: ["white_check_mark", "calendar"],
+    click: bookingUrl,
+  }),
   signal: AbortSignal.timeout(30_000),
 });
 

@@ -136,30 +136,32 @@ async function sendNtfyNotification(config, calendarResult, reason) {
     );
   }
 
-  const response = await fetch(
-    `${config.ntfyBaseUrl}/${encodeURIComponent(config.ntfyTopic)}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "text/plain; charset=utf-8",
-        Title: "发现入台旅游申请预约空位",
-        Priority: "urgent",
-        Tags: "calendar,warning",
-        Click: config.bookingUrl,
-      },
-      body: [
-        `可预约日期：${calendarResult.availableDates.join("、")}`,
-        calendarResult.calendarLabel
-          ? `日历：${calendarResult.calendarLabel}`
-          : null,
-        `提醒原因：${reason}`,
-        "请尽快打开预约页面确认。",
-      ]
-        .filter(Boolean)
-        .join("\n"),
-      signal: AbortSignal.timeout(30_000),
+  const message = [
+    `可预约日期：${calendarResult.availableDates.join("、")}`,
+    calendarResult.calendarLabel
+      ? `日历：${calendarResult.calendarLabel}`
+      : null,
+    `提醒原因：${reason}`,
+    "请尽快打开预约页面确认。",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const response = await fetch(config.ntfyBaseUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
     },
-  );
+    body: JSON.stringify({
+      topic: config.ntfyTopic,
+      title: "发现入台旅游申请预约空位",
+      message,
+      priority: 5,
+      tags: ["calendar", "warning"],
+      click: config.bookingUrl,
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
 
   if (!response.ok) {
     throw new Error(
