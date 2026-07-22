@@ -74,6 +74,8 @@ jobs:
           NTFY_BASE_URL: ${{ vars.NTFY_BASE_URL }}
           NOTIFY_REMINDER_HOURS: "6"
           STATE_FILE: .state/availability.json
+          CAPTURE_DISCOVERY: "true"
+          DISCOVERY_ARTIFACT_DIR: .artifacts/discovery
         run: npm run check
 
       - name: Save monitor state
@@ -84,3 +86,13 @@ jobs:
           path: .state/availability.json
           retention-days: 2
           if-no-files-found: error
+
+      - name: Save availability discovery
+        if: ${{ always() && !inputs.send_test_notification }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: availability-discovery-${{ github.run_id }}
+          path: .artifacts/discovery/
+          retention-days: 14
+          if-no-files-found: ignore
+          include-hidden-files: true

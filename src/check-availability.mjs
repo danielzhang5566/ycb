@@ -7,6 +7,11 @@ import {
   nextState,
   shouldNotify,
 } from "./monitor-state.mjs";
+import {
+  attachNetworkRecorder,
+  captureAvailabilityFlow,
+  shouldCaptureDiscovery,
+} from "./discovery-capture.mjs";
 
 const DEFAULT_BOOKING_URL =
   "https://tecomel-traveltotaiwan.youcanbook.me/";
@@ -41,6 +46,10 @@ function configFromEnvironment() {
     ),
     headless: process.env.HEADLESS !== "false",
     dryRun: process.env.DRY_RUN === "true",
+    captureDiscovery: process.env.CAPTURE_DISCOVERY !== "false",
+    discoveryArtifactRoot: resolve(
+      process.env.DISCOVERY_ARTIFACT_DIR || ".artifacts/discovery",
+    ),
   };
 }
 
@@ -62,7 +71,7 @@ async function writeState(path, state) {
   await rename(temporaryPath, path);
 }
 
-async function inspectCalendar(config) {
+async function inspectCalendar(config, previousState, checkedAt) {
   const browser = await chromium.launch({ headless: config.headless });
 
   try {
@@ -70,6 +79,7 @@ async function inspectCalendar(config) {
       locale: "en-AU",
       timezoneId: "Australia/Melbourne",
     });
+    const networkEvents = attachNetworkRecorder(page, config.bookingUrl);
 
     await page.goto(config.bookingUrl, {
       waitUntil: "domcontentloaded",
@@ -102,20 +112,40 @@ async function inspectCalendar(config) {
       return {
         calendarLabel: grid.getAttribute("aria-label"),
         dateButtonCount: dateButtons.length,
-        availableDates: dateButtons
+        availableDateOptions: dateButtons
           .filter(
             (button) =>
               !button.disabled && button.getAttribute("aria-disabled") !== "true",
           )
-          .map((button) => button.getAttribute("aria-label"))
-          .filter(Boolean),
+          .map((button) => ({
+            label: button.getAttribute("aria-label"),
+            testId: button.getAttribute("data-testid"),
+          }))
+          .filter((option) => option.label),
       };
     });
+    calendarResult.availableDates = calendarResult.availableDateOptions.map(
+      (option) => option.label,
+    );
 
     if (calendarResult.dateButtonCount === 0) {
       throw new Error(
         "The calendar loaded, but no date buttons were found. The booking page structure may have changed.",
       );
+    }
+
+    calendarResult.discovery = null;
+    if (
+      config.captureDiscovery &&
+      shouldCaptureDiscovery(calendarResult.availableDates, previousState)
+    ) {
+      calendarResult.discovery = await captureAvailabilityFlow({
+        page,
+        artifactRoot: config.discoveryArtifactRoot,
+        checkedAt,
+        calendarResult,
+        networkEvents,
+      });
     }
 
     return calendarResult;
@@ -142,6 +172,9 @@ async function sendNtfyNotification(config, calendarResult, reason) {
       ? `日历：${calendarResult.calendarLabel}`
       : null,
     `提醒原因：${reason}`,
+    calendarResult.discovery
+      ? `页面资料：已保存 ${calendarResult.discovery.stages.join(" → ") || "部分"} 阶段的分析 artifact`
+      : null,
     "请尽快打开预约页面确认。",
   ]
     .filter(Boolean)
@@ -182,7 +215,11 @@ async function main() {
 
   const checkedAt = new Date();
   const previousState = await readState(config.stateFile);
-  const calendarResult = await inspectCalendar(config);
+  const calendarResult = await inspectCalendar(
+    config,
+    previousState,
+    checkedAt,
+  );
   const decision = shouldNotify({
     availableDates: calendarResult.availableDates,
     previousState,
@@ -217,6 +254,7 @@ async function main() {
         calendar: calendarResult.calendarLabel,
         available: calendarResult.availableDates.length > 0,
         availableDates: calendarResult.availableDates,
+        discovery: calendarResult.discovery,
         notification: notified ? "sent" : decision.reason,
       },
       null,
