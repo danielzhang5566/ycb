@@ -1,0 +1,68 @@
+name: Monitor booking availability
+
+on:
+  schedule:
+    # Every 15 minutes, offset from the top of the hour to reduce scheduler load.
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: booking-availability-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Restore previous monitor state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          mkdir -p .state
+          artifact_id="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts?name=availability-state&per_page=1" --jq '.artifacts[0].id // empty')"
+          if [[ -n "$artifact_id" ]]; then
+            gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > /tmp/availability-state.zip
+            unzip -oq /tmp/availability-state.zip -d .state
+          else
+            echo "No previous state artifact; starting fresh."
+          fi
+
+      - name: Check availability and notify
+        env:
+          BOOKING_URL: https://tecomel-traveltotaiwan.youcanbook.me/
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_BASE_URL: ${{ vars.NTFY_BASE_URL }}
+          NOTIFY_REMINDER_HOURS: "6"
+          STATE_FILE: .state/availability.json
+        run: npm run check
+
+      - name: Save monitor state
+        if: ${{ always() && hashFiles('.state/availability.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: availability-state
+          path: .state/availability.json
+          retention-days: 2
+          if-no-files-found: error

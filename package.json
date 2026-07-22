@@ -1,0 +1,17 @@
+{
+  "name": "taiwan-booking-availability-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Monitor a public YouCanBookMe calendar and send ntfy alerts when dates become available.",
+  "scripts": {
+    "check": "node src/check-availability.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "1.61.1"
+  }
+}
