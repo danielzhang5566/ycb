@@ -1,6 +1,6 @@
 # 入台旅游预约空位监控
 
-每 15 分钟用 Playwright 打开以下公开预约页面，检查日历中是否出现可点击日期：
+由 cron-job.org 每 15 分钟触发 GitHub Actions，再用 Playwright 打开以下公开预约页面，检查日历中是否出现可点击日期：
 
 <https://tecomel-traveltotaiwan.youcanbook.me/>
 
@@ -57,12 +57,14 @@ git push -u origin main
 
 如果使用自建 ntfy，再在同一页面的 **Variables** 中增加 `NTFY_BASE_URL`；使用 ntfy.sh 时无需设置。
 
-## 4. 启用并测试
+## 4. 手动测试
 
 1. 打开仓库的 **Actions** 页面。
 2. 选择 **Monitor booking availability**。
-3. 点击 **Run workflow** 手动运行一次。
-4. 打开运行日志，正常无空位时会看到：
+3. 点击 **Run workflow**。
+4. 不勾选 `Send an ntfy test notification...` 时，会立即检查预约页面。
+5. 勾选该选项时，只发送一条 ntfy 测试通知，不运行 Playwright。
+6. 打开检查任务日志，正常无空位时会看到：
 
    ```json
    {
@@ -71,9 +73,55 @@ git push -u origin main
    }
    ```
 
-定时运行配置在 [`.github/workflows/monitor.yml`](.github/workflows/monitor.yml)。当前时间为每小时第 7、22、37、52 分钟，即每 15 分钟检查一次。
+## 5. 创建 GitHub Fine-grained token
 
-> GitHub 可能延迟定时任务。公开仓库连续 60 天没有活动时，GitHub 也可能自动停用 schedule；届时进入 Actions 页面重新启用即可。
+cron-job.org 需要调用 GitHub 的 workflow-dispatch API。为它创建一个权限受限的 token：
+
+1. 打开 GitHub：`Settings → Developer settings → Personal access tokens → Fine-grained tokens`。
+2. 点击 **Generate new token**。
+3. 设置一个较短的过期时间，例如 90 天，并在到期前更换。
+4. Repository access 选择 **Only select repositories**，只选择 `ycb`。
+5. Repository permissions 中只把 **Actions** 设置为 **Read and write**。
+6. 生成并立即复制 token；GitHub 之后不会再次显示它。
+
+不要把 token 放进仓库、README、issue 或 Actions 日志。cron-job.org 会持有它，因此不要使用权限更大的 classic PAT。
+
+## 6. 配置 cron-job.org
+
+在 <https://console.cron-job.org/> 创建一个 cronjob：
+
+- Title：`Taiwan booking availability monitor`
+- URL：
+
+  ```text
+  https://api.github.com/repos/danielzhang5566/ycb/actions/workflows/monitor.yml/dispatches
+  ```
+
+- Schedule：每 15 分钟
+- Request method：`POST`
+- Request headers：
+
+  ```text
+  Accept: application/vnd.github+json
+  Authorization: Bearer YOUR_FINE_GRAINED_TOKEN
+  Content-Type: application/json
+  X-GitHub-Api-Version: 2026-03-10
+  ```
+
+- Request body：
+
+  ```json
+  {
+    "ref": "main",
+    "inputs": {
+      "send_test_notification": "false"
+    }
+  }
+  ```
+
+保存后先使用 cron-job.org 的 **Test run**。成功时 GitHub API 返回 HTTP `204 No Content`；几秒后可以在仓库 **Actions** 页面看到一条名为 **Check booking availability** 的运行记录。
+
+cron-job.org 官方说明服务完全免费，单个任务最高可以每分钟执行一次，但仍应遵守 fair use。本项目每 15 分钟一次即可。
 
 ## 本地运行
 
@@ -117,17 +165,4 @@ npm test
 
 ## 修改检查频率
 
-GitHub Actions 使用 cron。当前为每 15 分钟：
-
-```yaml
-- cron: "7,22,37,52 * * * *"
-```
-
-如需每 10 分钟，可改为：
-
-```yaml
-- cron: "7,17,27,37,47,57 * * * *"
-```
-
-不建议设置得更频繁，以免给公开预约服务造成不必要的负担。
-
+检查频率在 cron-job.org 控制，无需修改仓库代码。建议保持每 15 分钟；不建议设置得更频繁，以免给公开预约服务造成不必要的负担。

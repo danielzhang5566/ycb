@@ -1,14 +1,14 @@
 name: Monitor booking availability
+run-name: ${{ inputs.send_test_notification && 'Send ntfy test notification' || 'Check booking availability' }}
 
 on:
-  schedule:
-    # Every 15 minutes, offset from the top of the hour to reduce scheduler load.
-    # - cron: "7,22,37,52 * * * *"
-    - cron: "7,11,13,16,19,21,22,37,52 * * * *"
+  # cron-job.org calls this workflow_dispatch endpoint every 15 minutes.
+  # GitHub's built-in schedule trigger is intentionally omitted to prevent
+  # duplicate runs if its scheduler starts working again.
   workflow_dispatch:
     inputs:
       send_test_notification:
-        description: "Send an ntfy test notification instead of checking the calendar"
+        description: "Send an ntfy test notification instead of checking availability"
         required: true
         default: false
         type: boolean
