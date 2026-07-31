@@ -4,3 +4,4 @@ node_modules/
 .artifacts/
 playwright-report/
 test-results/
+README.md
