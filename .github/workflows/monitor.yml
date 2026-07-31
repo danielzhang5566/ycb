@@ -76,6 +76,8 @@ jobs:
           STATE_FILE: .state/availability.json
           CAPTURE_DISCOVERY: "true"
           DISCOVERY_ARTIFACT_DIR: .artifacts/discovery
+          AUTO_FILL_BOOKING: "true"
+          BOOKING_PROFILE_JSON: ${{ secrets.BOOKING_PROFILE_JSON }}
         run: npm run check
 
       - name: Save monitor state

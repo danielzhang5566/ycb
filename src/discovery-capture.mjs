@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { availabilityFingerprint } from "./monitor-state.mjs";
+import { autofillBookingForm } from "./form-autofill.mjs";
 
 const TIME_LABEL = /\b\d{1,2}:\d{2}\s*(?:am|pm)\b/i;
 
@@ -254,6 +255,7 @@ export async function captureAvailabilityFlow({
   checkedAt,
   calendarResult,
   networkEvents,
+  bookingProfile,
 }) {
   const directory = resolve(artifactRoot, fileSafeTimestamp(checkedAt));
   await mkdir(directory, { recursive: true });
@@ -266,6 +268,7 @@ export async function captureAvailabilityFlow({
     availableDates: calendarResult.availableDates,
     stages: [],
     stoppedBeforeSubmission: true,
+    autofill: null,
   };
 
   try {
@@ -310,6 +313,10 @@ export async function captureAvailabilityFlow({
 
     await captureStage(page, directory, "03-form");
     manifest.stages.push("form");
+
+    // Capture artifacts before filling. Screenshots and HTML must never contain
+    // personal values supplied through BOOKING_PROFILE_JSON.
+    manifest.autofill = await autofillBookingForm(page, bookingProfile);
   } catch (error) {
     manifest.discoveryError = error.stack || error.message;
   } finally {
@@ -322,6 +329,7 @@ export async function captureAvailabilityFlow({
     stages: manifest.stages,
     selectedDate: manifest.selectedDate,
     selectedTime: manifest.selectedTime,
+    autofill: manifest.autofill,
     error: manifest.discoveryError || null,
   };
 }

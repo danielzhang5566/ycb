@@ -12,6 +12,7 @@ import {
   captureAvailabilityFlow,
   shouldCaptureDiscovery,
 } from "./discovery-capture.mjs";
+import { parseBookingProfile } from "./form-autofill.mjs";
 
 const DEFAULT_BOOKING_URL =
   "https://tecomel-traveltotaiwan.youcanbook.me/";
@@ -50,6 +51,10 @@ function configFromEnvironment() {
     discoveryArtifactRoot: resolve(
       process.env.DISCOVERY_ARTIFACT_DIR || ".artifacts/discovery",
     ),
+    bookingProfile:
+      process.env.AUTO_FILL_BOOKING === "true"
+        ? parseBookingProfile(process.env.BOOKING_PROFILE_JSON)
+        : null,
   };
 }
 
@@ -145,6 +150,7 @@ async function inspectCalendar(config, previousState, checkedAt) {
         checkedAt,
         calendarResult,
         networkEvents,
+        bookingProfile: config.bookingProfile,
       });
     }
 
@@ -174,6 +180,9 @@ async function sendNtfyNotification(config, calendarResult, reason) {
     `提醒原因：${reason}`,
     calendarResult.discovery
       ? `页面资料：已保存 ${calendarResult.discovery.stages.join(" → ") || "部分"} 阶段的分析 artifact`
+      : null,
+    calendarResult.discovery?.autofill?.enabled
+      ? `自动填写：已填写 ${calendarResult.discovery.autofill.filledFields.length} 项；验证题和最终提交未处理`
       : null,
     "请尽快打开预约页面确认。",
   ]
