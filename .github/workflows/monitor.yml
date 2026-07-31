@@ -39,10 +39,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Chromium
-        if: ${{ !inputs.send_test_notification }}
-        run: npx playwright install --with-deps chromium
-
       - name: Send ntfy test notification
         if: ${{ inputs.send_test_notification }}
         env:
@@ -76,6 +72,9 @@ jobs:
           STATE_FILE: .state/availability.json
           CAPTURE_DISCOVERY: "true"
           DISCOVERY_ARTIFACT_DIR: .artifacts/discovery
+          # ubuntu-latest already includes Google Chrome. Using it avoids a
+          # 20-30 second Playwright browser installation on every run.
+          BROWSER_CHANNEL: chrome
           AUTO_FILL_BOOKING: "true"
           BOOKING_PROFILE_JSON: ${{ secrets.BOOKING_PROFILE_JSON }}
         run: npm run check

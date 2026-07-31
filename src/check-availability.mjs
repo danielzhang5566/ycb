@@ -46,6 +46,7 @@ function configFromEnvironment() {
       "NAVIGATION_TIMEOUT_MS",
     ),
     headless: process.env.HEADLESS !== "false",
+    browserChannel: process.env.BROWSER_CHANNEL?.trim() || undefined,
     dryRun: process.env.DRY_RUN === "true",
     captureDiscovery: process.env.CAPTURE_DISCOVERY !== "false",
     discoveryArtifactRoot: resolve(
@@ -77,7 +78,10 @@ async function writeState(path, state) {
 }
 
 async function inspectCalendar(config, previousState, checkedAt) {
-  const browser = await chromium.launch({ headless: config.headless });
+  const browser = await chromium.launch({
+    headless: config.headless,
+    channel: config.browserChannel,
+  });
 
   try {
     const page = await browser.newPage({
