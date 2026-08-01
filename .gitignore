@@ -1,7 +1,9 @@
 node_modules/
+.idea
 .env
 .state/
 .artifacts/
+resource/
 playwright-report/
 test-results/
 README.md

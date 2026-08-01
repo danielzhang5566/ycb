@@ -5,13 +5,13 @@
   "type": "module",
   "description": "Monitor a public YouCanBookMe calendar and send ntfy alerts when dates become available.",
   "scripts": {
-    "check": "node src/check-availability.mjs",
-    "notify:test": "node src/send-test-notification.mjs",
+    "check": "node --env-file-if-exists=.env src/check-availability.mjs",
+    "notify:test": "node --env-file-if-exists=.env src/send-test-notification.mjs",
     "test": "node --test test/*.test.mjs",
     "test:discovery": "node test/discovery-flow.integration.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.19"
   },
   "dependencies": {
     "playwright": "1.61.1"
