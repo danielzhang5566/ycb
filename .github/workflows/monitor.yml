@@ -28,10 +28,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: npm
@@ -81,7 +81,7 @@ jobs:
 
       - name: Save monitor state
         if: ${{ always() && !inputs.send_test_notification && hashFiles('.state/availability.json') != '' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: availability-state
           path: .state/availability.json
@@ -90,7 +90,7 @@ jobs:
 
       - name: Save availability discovery
         if: ${{ always() && !inputs.send_test_notification }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: availability-discovery-${{ github.run_id }}
           path: .artifacts/discovery/
