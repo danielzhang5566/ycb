@@ -77,7 +77,12 @@ jobs:
           BROWSER_CHANNEL: chrome
           AUTO_FILL_BOOKING: "true"
           BOOKING_PROFILE_JSON: ${{ secrets.BOOKING_PROFILE_JSON }}
-        run: npm run check
+          SECOND_CHECK_DELAY_SECONDS: "25"
+        run: |
+          npm run check
+          echo "Waiting ${SECOND_CHECK_DELAY_SECONDS}s before the second check..."
+          sleep "$SECOND_CHECK_DELAY_SECONDS"
+          npm run check
 
       - name: Save monitor state
         if: ${{ always() && !inputs.send_test_notification && hashFiles('.state/availability.json') != '' }}
