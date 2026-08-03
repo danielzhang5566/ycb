@@ -157,8 +157,11 @@ async function inspectCalendar(
 
     if (
       config.captureDiscovery &&
-      (config.autoSubmitBooking ||
-        shouldCaptureDiscovery(calendarResult.availableDates, previousState))
+      shouldCaptureDiscovery(
+        calendarResult.availableDates,
+        previousState,
+        config.autoSubmitBooking,
+      )
     ) {
       calendarResult.discovery = await captureAvailabilityFlow({
         page,

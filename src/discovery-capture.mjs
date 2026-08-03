@@ -13,8 +13,13 @@ const UNAVAILABLE_SUBMISSION_CODES = new Set([
   "BOOKING_SLOT_UNAVAILABLE",
 ]);
 
-export function shouldCaptureDiscovery(availableDates, previousState) {
+export function shouldCaptureDiscovery(
+  availableDates,
+  previousState,
+  forceCapture = false,
+) {
   if (availableDates.length === 0) return false;
+  if (forceCapture) return true;
   return (
     previousState.status !== "available" ||
     previousState.fingerprint !== availabilityFingerprint(availableDates)

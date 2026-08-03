@@ -20,6 +20,29 @@ test("captures discovery when availability first appears", () => {
   );
 });
 
+test("does not capture discovery without available dates when forced", () => {
+  assert.equal(
+    shouldCaptureDiscovery([], EMPTY_STATE, true),
+    false,
+  );
+});
+
+test("force-captures unchanged availability for automatic submission", () => {
+  const dates = ["Thursday 1 October 2026"];
+  assert.equal(
+    shouldCaptureDiscovery(
+      dates,
+      {
+        ...EMPTY_STATE,
+        status: "available",
+        fingerprint: availabilityFingerprint(dates),
+      },
+      true,
+    ),
+    true,
+  );
+});
+
 test("does not recapture an unchanged set of available dates", () => {
   const dates = ["Thursday 1 October 2026"];
   assert.equal(
