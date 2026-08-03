@@ -53,6 +53,26 @@ test("suppresses an unchanged notification inside the reminder window", () => {
   assert.equal(result.reason, "duplicate-suppressed");
 });
 
+test("suppresses the same dates after a brief no-availability result", () => {
+  const dates = ["Thursday 1 October 2026"];
+  const fingerprint = availabilityFingerprint(dates);
+  const result = shouldNotify({
+    availableDates: dates,
+    previousState: {
+      ...EMPTY_STATE,
+      status: "none",
+      fingerprint: null,
+      lastNotifiedAt: "2026-07-22T08:00:00.000Z",
+      lastNotifiedFingerprint: fingerprint,
+    },
+    now,
+    reminderHours: 6,
+  });
+
+  assert.equal(result.notify, false);
+  assert.equal(result.reason, "duplicate-suppressed");
+});
+
 test("notifies when the available dates change", () => {
   const previousDates = ["Thursday 1 October 2026"];
   const result = shouldNotify({
@@ -113,4 +133,21 @@ test("preserves notification metadata when no notification is sent", () => {
     result.lastNotifiedFingerprint,
     previousState.lastNotifiedFingerprint,
   );
+});
+
+test("preserves an automatic-submission lock across later state updates", () => {
+  const bookingSubmission = {
+    attemptedAt: "2026-07-22T09:00:00.000Z",
+    confirmed: true,
+    status: "confirmed",
+  };
+  const result = nextState({
+    availableDates: [],
+    previousState: { ...EMPTY_STATE, bookingSubmission },
+    checkedAt: now,
+    notified: false,
+    fingerprint: null,
+  });
+
+  assert.deepEqual(result.bookingSubmission, bookingSubmission);
 });

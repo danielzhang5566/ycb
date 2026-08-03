@@ -56,6 +56,10 @@ function configFromEnvironment() {
       process.env.AUTO_FILL_BOOKING === "true"
         ? parseBookingProfile(process.env.BOOKING_PROFILE_JSON)
         : null,
+    // DRY_RUN must also prevent the irreversible booking click, not only ntfy.
+    autoSubmitBooking:
+      process.env.AUTO_SUBMIT_BOOKING === "true" &&
+      process.env.DRY_RUN !== "true",
   };
 }
 
@@ -77,7 +81,12 @@ async function writeState(path, state) {
   await rename(temporaryPath, path);
 }
 
-async function inspectCalendar(config, previousState, checkedAt) {
+async function inspectCalendar(
+  config,
+  previousState,
+  checkedAt,
+  onCalendarInspected,
+) {
   const browser = await chromium.launch({
     headless: config.headless,
     channel: config.browserChannel,
@@ -144,9 +153,12 @@ async function inspectCalendar(config, previousState, checkedAt) {
     }
 
     calendarResult.discovery = null;
+    await onCalendarInspected(calendarResult);
+
     if (
       config.captureDiscovery &&
-      shouldCaptureDiscovery(calendarResult.availableDates, previousState)
+      (config.autoSubmitBooking ||
+        shouldCaptureDiscovery(calendarResult.availableDates, previousState))
     ) {
       calendarResult.discovery = await captureAvailabilityFlow({
         page,
@@ -155,6 +167,8 @@ async function inspectCalendar(config, previousState, checkedAt) {
         calendarResult,
         networkEvents,
         bookingProfile: config.bookingProfile,
+        autoSubmitBooking: config.autoSubmitBooking,
+        bookingUrl: config.bookingUrl,
       });
     }
 
@@ -218,6 +232,36 @@ async function sendNtfyNotification(config, calendarResult, reason) {
   return true;
 }
 
+async function sendSubmissionNotification(config, submission) {
+  if (config.dryRun) {
+    console.log("DRY_RUN=true; submission-result notification was not sent.");
+    return false;
+  }
+
+  const confirmed = submission.confirmed;
+  const response = await fetch(config.ntfyBaseUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify({
+      topic: config.ntfyTopic,
+      title: confirmed ? "预约已自动提交并确认" : "自动提交结果需要确认",
+      message: confirmed
+        ? "服务端已返回预约编号。请检查确认邮件；自动提交现已锁定，不会重复预约。"
+        : `程序已尝试提交，但未取得预约编号（${submission.status}）。请检查邮件或预约页面；自动提交现已锁定，避免重复提交。`,
+      priority: 5,
+      tags: confirmed ? ["white_check_mark", "calendar"] : ["warning", "calendar"],
+      click: config.bookingUrl,
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `ntfy returned HTTP ${response.status}: ${await response.text()}`,
+    );
+  }
+  return true;
+}
+
 async function main() {
   const config = configFromEnvironment();
   if (!config.dryRun && !config.ntfyTopic) {
@@ -225,40 +269,83 @@ async function main() {
       "NTFY_TOPIC is not configured. Add it as a GitHub Actions secret, or use DRY_RUN=true for a notification-free check.",
     );
   }
+  if (config.autoSubmitBooking && !config.bookingProfile) {
+    throw new Error(
+      "AUTO_SUBMIT_BOOKING=true requires AUTO_FILL_BOOKING=true and a non-empty BOOKING_PROFILE_JSON secret.",
+    );
+  }
 
   const checkedAt = new Date();
   const previousState = await readState(config.stateFile);
+  if (config.autoSubmitBooking && previousState.bookingSubmission?.attemptedAt) {
+    console.log(
+      JSON.stringify(
+        {
+          checkedAt: checkedAt.toISOString(),
+          skipped: "automatic-submission-locked",
+          bookingSubmission: previousState.bookingSubmission,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
+  let decision;
+  let notified = false;
+  let currentState = previousState;
   const calendarResult = await inspectCalendar(
     config,
     previousState,
     checkedAt,
-  );
-  const decision = shouldNotify({
-    availableDates: calendarResult.availableDates,
-    previousState,
-    now: checkedAt,
-    reminderHours: config.reminderHours,
-  });
+    async (inspectedCalendar) => {
+      decision = shouldNotify({
+        availableDates: inspectedCalendar.availableDates,
+        previousState,
+        now: checkedAt,
+        reminderHours: config.reminderHours,
+      });
 
-  let notified = false;
-  if (decision.notify) {
-    notified = await sendNtfyNotification(
-      config,
-      calendarResult,
-      decision.reason,
+      if (decision.notify) {
+        notified = await sendNtfyNotification(
+          config,
+          inspectedCalendar,
+          decision.reason,
+        );
+      }
+
+      // Persist notification metadata before discovery navigation. A slow or
+      // failed discovery attempt must not cause the same alert to be sent by
+      // the next run.
+      currentState = nextState({
+        availableDates: inspectedCalendar.availableDates,
+        previousState,
+        checkedAt,
+        notified,
+        fingerprint: decision.fingerprint,
+      });
+      await writeState(config.stateFile, currentState);
+    },
+  );
+
+  const submission = calendarResult.discovery?.submission;
+  if (submission?.attempted && !submission.safeToRetry) {
+    currentState = {
+      ...currentState,
+      bookingSubmission: {
+        attemptedAt: new Date().toISOString(),
+        confirmed: submission.confirmed,
+        status: submission.status,
+      },
+    };
+    await writeState(config.stateFile, currentState);
+    await sendSubmissionNotification(config, submission);
+  } else if (submission?.safeToRetry) {
+    console.log(
+      "The selected slot became unavailable; no submission lock was saved so later slots/runs can retry.",
     );
   }
-
-  await writeState(
-    config.stateFile,
-    nextState({
-      availableDates: calendarResult.availableDates,
-      previousState,
-      checkedAt,
-      notified,
-      fingerprint: decision.fingerprint,
-    }),
-  );
 
   console.log(
     JSON.stringify(

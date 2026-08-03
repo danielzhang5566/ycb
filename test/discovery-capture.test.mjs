@@ -70,3 +70,16 @@ test("network URL sanitization redacts long path credentials", () => {
   assert.equal(result.pathname, "/session/[redacted-segment]/availability");
   assert.equal(JSON.stringify(result).includes(credential), false);
 });
+
+test("network URL sanitization redacts YouCanBookMe intent identifiers", () => {
+  const intentId = "itt_933827f3-d7f7-48dd-9ec4-d19a3b4fd4fc";
+  const result = sanitizedNetworkUrl(
+    `https://api.youcanbook.me/v1/intents/${intentId}/selections`,
+  );
+
+  assert.equal(
+    result.pathname,
+    "/v1/intents/[redacted-segment]/selections",
+  );
+  assert.equal(JSON.stringify(result).includes(intentId), false);
+});

@@ -7,6 +7,7 @@ export const EMPTY_STATE = Object.freeze({
   lastCheckedAt: null,
   lastNotifiedAt: null,
   lastNotifiedFingerprint: null,
+  bookingSubmission: null,
 });
 
 export function availabilityFingerprint(dates) {
@@ -26,23 +27,28 @@ export function shouldNotify({
   }
 
   const fingerprint = availabilityFingerprint(availableDates);
+  const lastNotifiedAt = Date.parse(previousState.lastNotifiedAt ?? "");
+  const reminderMs = reminderHours * 60 * 60 * 1000;
+  const sameAsLastNotification =
+    previousState.lastNotifiedFingerprint === fingerprint;
+
+  if (
+    sameAsLastNotification &&
+    Number.isFinite(lastNotifiedAt) &&
+    now.getTime() - lastNotifiedAt < reminderMs
+  ) {
+    return { notify: false, reason: "duplicate-suppressed", fingerprint };
+  }
+
+  if (sameAsLastNotification) {
+    return { notify: true, reason: "reminder-due", fingerprint };
+  }
 
   if (previousState.status !== "available") {
     return { notify: true, reason: "became-available", fingerprint };
   }
 
-  if (previousState.lastNotifiedFingerprint !== fingerprint) {
-    return { notify: true, reason: "availability-changed", fingerprint };
-  }
-
-  const lastNotifiedAt = Date.parse(previousState.lastNotifiedAt ?? "");
-  const reminderMs = reminderHours * 60 * 60 * 1000;
-
-  if (!Number.isFinite(lastNotifiedAt) || now.getTime() - lastNotifiedAt >= reminderMs) {
-    return { notify: true, reason: "reminder-due", fingerprint };
-  }
-
-  return { notify: false, reason: "duplicate-suppressed", fingerprint };
+  return { notify: true, reason: "availability-changed", fingerprint };
 }
 
 export function nextState({
@@ -51,6 +57,7 @@ export function nextState({
   checkedAt,
   notified,
   fingerprint,
+  bookingSubmission = previousState.bookingSubmission,
 }) {
   const isAvailable = availableDates.length > 0;
 
@@ -65,5 +72,6 @@ export function nextState({
     lastNotifiedFingerprint: notified
       ? fingerprint
       : previousState.lastNotifiedFingerprint,
+    bookingSubmission,
   };
 }

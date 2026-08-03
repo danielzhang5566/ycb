@@ -5,6 +5,13 @@ import { availabilityFingerprint } from "./monitor-state.mjs";
 import { autofillBookingForm } from "./form-autofill.mjs";
 
 const TIME_LABEL = /\b\d{1,2}:\d{2}\s*(?:am|pm)\b/i;
+const DISCOVERY_CLICK_TIMEOUT_MS = 5_000;
+const SUBMISSION_CONFIRM_TIMEOUT_MS = 15_000;
+const MAX_SLOT_ATTEMPTS = 8;
+const UNAVAILABLE_SUBMISSION_CODES = new Set([
+  "INTENT_UNAVAILABLE_TIME_SLOT",
+  "BOOKING_SLOT_UNAVAILABLE",
+]);
 
 export function shouldCaptureDiscovery(availableDates, previousState) {
   if (availableDates.length === 0) return false;
@@ -22,7 +29,10 @@ export function sanitizedNetworkUrl(rawUrl) {
       pathname: url.pathname
         .split("/")
         .map((segment) =>
-          segment.length >= 48 ? "[redacted-segment]" : segment,
+          segment.length >= 48 ||
+          /^(?:itt|bkg|bok)_[0-9a-z-]+$/i.test(segment)
+            ? "[redacted-segment]"
+            : segment,
         )
         .join("/"),
       queryKeys: [...new Set(url.searchParams.keys())].sort(),
@@ -86,7 +96,10 @@ async function sanitizedHtml(page) {
         url.pathname = url.pathname
           .split("/")
           .map((segment) =>
-            segment.length >= 48 ? "[redacted-segment]" : segment,
+            segment.length >= 48 ||
+            /^(?:itt|bkg|bok)_[0-9a-z-]+$/i.test(segment)
+              ? "[redacted-segment]"
+              : segment,
           )
           .join("/");
         const queryKeys = [...new Set(url.searchParams.keys())].sort();
@@ -153,8 +166,29 @@ async function pageStructure(page) {
       );
     };
 
+    const safeUrl = (rawValue) => {
+      try {
+        const url = new URL(rawValue, location.href);
+        return {
+          origin: url.origin,
+          pathname: url.pathname
+            .split("/")
+            .map((segment) =>
+              segment.length >= 48 ||
+              /^(?:itt|bkg|bok)_[0-9a-z-]+$/i.test(segment)
+                ? "[redacted-segment]"
+                : segment,
+            )
+            .join("/"),
+          queryKeys: [...new Set(url.searchParams.keys())].sort(),
+        };
+      } catch {
+        return { origin: null, pathname: "[invalid-url]", queryKeys: [] };
+      }
+    };
+
     return {
-      url: location.href,
+      url: safeUrl(location.href),
       title: document.title,
       headings: [...document.querySelectorAll("h1, h2, h3")]
         .map(text)
@@ -163,8 +197,7 @@ async function pageStructure(page) {
       forms: [...document.forms].slice(0, 10).map((form, index) => ({
         index,
         method: form.method,
-        actionOrigin: form.action ? new URL(form.action).origin : null,
-        actionPathname: form.action ? new URL(form.action).pathname : null,
+        action: form.action ? safeUrl(form.action) : null,
       })),
       fields: [
         ...document.querySelectorAll("input, textarea, select"),
@@ -198,8 +231,7 @@ async function pageStructure(page) {
         .slice(0, 100)
         .map((link) => ({
           text: text(link),
-          origin: new URL(link.href).origin,
-          pathname: new URL(link.href).pathname,
+          url: safeUrl(link.href),
         })),
     };
   });
@@ -220,6 +252,204 @@ async function captureStage(page, directory, stage) {
 async function settle(page) {
   await page.waitForLoadState("networkidle", { timeout: 8_000 }).catch(() => {});
   await page.waitForTimeout(750);
+}
+
+async function submitBookingForm(page, enabled, autofill) {
+  const result = {
+    enabled,
+    attempted: false,
+    confirmed: false,
+    status: enabled ? "not-ready" : "disabled",
+    safeToRetry: false,
+    observedResponses: [],
+  };
+  if (!enabled || !autofill?.readyToSubmit) return result;
+
+  let resolveOutcome;
+  const serverOutcome = new Promise((resolve) => {
+    resolveOutcome = resolve;
+  });
+  const responseHandler = async (response) => {
+    const url = new URL(response.url());
+    const method = response.request().method();
+    if (
+      url.origin !== "https://api.youcanbook.me" ||
+      !url.pathname.startsWith("/v1/intents/") ||
+      !["GET", "PATCH", "POST"].includes(method)
+    ) {
+      return;
+    }
+
+    const summary = {
+      method,
+      status: response.status(),
+      url: sanitizedNetworkUrl(response.url()),
+      intentStatus: null,
+      errorCode: null,
+      hasBookingId: false,
+    };
+    try {
+      const body = await response.json();
+      summary.intentStatus =
+        typeof body?.intentStatus === "string" ? body.intentStatus : null;
+      summary.hasBookingId = Boolean(body?.bookingId);
+      const serializedBody = JSON.stringify(body);
+      summary.errorCode = [...UNAVAILABLE_SUBMISSION_CODES].find((code) =>
+        serializedBody.includes(code),
+      ) || null;
+    } catch {
+      // Some intent responses have no JSON body. The status and URL are still
+      // useful, while request/response bodies are deliberately never saved.
+    }
+    if (result.observedResponses.length < 30) {
+      result.observedResponses.push(summary);
+    }
+    if (summary.hasBookingId) resolveOutcome("confirmed");
+    if (summary.errorCode) resolveOutcome("unavailable");
+  };
+
+  page.on("response", responseHandler);
+  try {
+    const button = page.getByTestId("confirm_button");
+    if ((await button.count()) !== 1 || !(await button.isVisible())) {
+      result.status = "button-missing";
+      return result;
+    }
+    if (!(await button.isEnabled())) {
+      result.status = "button-disabled";
+      return result;
+    }
+    const formValid = await button.evaluate((element) => {
+      const form = element.closest("form");
+      return !form || form.checkValidity();
+    });
+    if (!formValid) {
+      result.status = "form-invalid";
+      return result;
+    }
+
+    result.attempted = true;
+    await button.click({ timeout: DISCOVERY_CLICK_TIMEOUT_MS });
+    const unavailableInPage = page
+      .waitForFunction(
+        () => {
+          const text = document.body.innerText;
+          return /(?:time selected.*not available anymore|sorry, the time is not available|not enough units available)/i.test(
+            text,
+          );
+        },
+        undefined,
+        { timeout: SUBMISSION_CONFIRM_TIMEOUT_MS },
+      )
+      .then(() => "unavailable")
+      .catch(() => null);
+    const outcome = await Promise.race([
+      serverOutcome,
+      unavailableInPage,
+      page.waitForTimeout(SUBMISSION_CONFIRM_TIMEOUT_MS).then(() => null),
+    ]);
+    result.confirmed = outcome === "confirmed";
+    result.status = outcome || "uncertain";
+    result.safeToRetry = outcome === "unavailable";
+  } catch (error) {
+    result.status = "click-failed";
+    result.error = error.message;
+  } finally {
+    page.off("response", responseHandler);
+  }
+
+  return result;
+}
+
+async function loadFreshCalendar(page, bookingUrl) {
+  await page.goto(bookingUrl, {
+    waitUntil: "domcontentloaded",
+    timeout: 30_000,
+  });
+  const calendar = page.getByRole("grid");
+  await calendar.waitFor({ state: "visible", timeout: 30_000 });
+  await page.waitForFunction(
+    () => {
+      const grid = document.querySelector('[role="grid"]');
+      const buttons = grid
+        ? [...grid.querySelectorAll('button[data-testid^="day_"]')]
+        : [];
+      return (
+        buttons.length > 0 &&
+        buttons.every((button) => button.dataset.loading !== "true")
+      );
+    },
+    undefined,
+    { timeout: 30_000 },
+  );
+  await dismissCookieConsent(page);
+}
+
+async function selectNextSlot({
+  page,
+  bookingUrl,
+  dateOptions,
+  attemptedSlotIds,
+  useCurrentCalendar,
+}) {
+  for (let index = 0; index < dateOptions.length; index += 1) {
+    if (!useCurrentCalendar || index > 0) {
+      await loadFreshCalendar(page, bookingUrl);
+    }
+    useCurrentCalendar = false;
+
+    const date = dateOptions[index];
+    const dateButton = page.getByTestId(date.testId);
+    if (
+      (await dateButton.count()) !== 1 ||
+      !(await dateButton.isEnabled()) ||
+      !(await dateButton.isVisible())
+    ) {
+      continue;
+    }
+    await dateButton.click({ timeout: DISCOVERY_CLICK_TIMEOUT_MS });
+    await settle(page);
+
+    const times = await availableTimeCandidates(page);
+    const time = times.find(
+      (candidate) => {
+        const key = `${date.testId}|${candidate.testId || candidate.label}`;
+        return !attemptedSlotIds.has(key);
+      },
+    );
+    if (time) return { date, time, times };
+  }
+  return null;
+}
+
+async function dismissCookieConsent(page) {
+  const consent = page.getByTestId("cookie_consent");
+  const visible = await consent
+    .waitFor({ state: "visible", timeout: 1_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!visible) return false;
+
+  const reject = consent.getByRole("button", {
+    name: /^(?:reject|decline)$/i,
+  });
+  const button =
+    (await reject.count()) === 1
+      ? reject
+      : consent.getByTestId("cookie_consent_accept");
+
+  if ((await button.count()) !== 1) {
+    throw new Error(
+      "Cookie consent is visible, but no unique dismiss button was found",
+    );
+  }
+
+  await button.click({ timeout: DISCOVERY_CLICK_TIMEOUT_MS });
+  await consent.waitFor({
+    state: "hidden",
+    timeout: DISCOVERY_CLICK_TIMEOUT_MS,
+  });
+  return true;
 }
 
 async function availableTimeCandidates(page) {
@@ -256,6 +486,8 @@ export async function captureAvailabilityFlow({
   calendarResult,
   networkEvents,
   bookingProfile,
+  autoSubmitBooking = false,
+  bookingUrl = new URL(page.url()).origin,
 }) {
   const directory = resolve(artifactRoot, fileSafeTimestamp(checkedAt));
   await mkdir(directory, { recursive: true });
@@ -269,54 +501,93 @@ export async function captureAvailabilityFlow({
     stages: [],
     stoppedBeforeSubmission: true,
     autofill: null,
+    submission: null,
+    attempts: [],
+    cookieConsentDismissed: false,
   };
 
   try {
+    manifest.cookieConsentDismissed = await dismissCookieConsent(page);
     await captureStage(page, directory, "01-calendar");
     manifest.stages.push("calendar");
 
-    const firstDate = calendarResult.availableDateOptions[0];
-    if (!firstDate?.testId) {
+    if (!calendarResult.availableDateOptions[0]?.testId) {
       throw new Error("Available date did not expose a stable data-testid");
     }
+    const attemptedSlotIds = new Set();
+    let useCurrentCalendar = true;
+    for (let attempt = 1; attempt <= MAX_SLOT_ATTEMPTS; attempt += 1) {
+      const slot = await selectNextSlot({
+        page,
+        bookingUrl,
+        dateOptions: calendarResult.availableDateOptions,
+        attemptedSlotIds,
+        useCurrentCalendar,
+      });
+      useCurrentCalendar = false;
+      if (!slot) {
+        if (manifest.attempts.some((item) => item.submission.safeToRetry)) {
+          manifest.submission = {
+            enabled: autoSubmitBooking,
+            attempted: true,
+            confirmed: false,
+            status: "all-candidates-unavailable",
+            safeToRetry: true,
+            observedResponses: manifest.attempts.flatMap(
+              (item) => item.submission.observedResponses,
+            ),
+          };
+        }
+        break;
+      }
 
-    const dateButton = page.locator(
-      `button[data-testid="${firstDate.testId}"]`,
+      if (attempt === 1) {
+        manifest.selectedDate = slot.date.label;
+        manifest.availableTimes = slot.times;
+        await captureStage(page, directory, "02-times");
+        manifest.stages.push("times");
+      }
+
+      const timeButton = slot.time.testId
+        ? page.getByTestId(slot.time.testId)
+        : page.getByRole("button", { name: slot.time.label, exact: true });
+      if ((await timeButton.count()) !== 1) {
+        throw new Error("Available time selector was not unique");
+      }
+      await timeButton.click({ timeout: DISCOVERY_CLICK_TIMEOUT_MS });
+      await settle(page);
+
+      if (attempt === 1) {
+        manifest.selectedTime = slot.time.label;
+        await captureStage(page, directory, "03-form");
+        manifest.stages.push("form");
+      }
+
+      const autofill = await autofillBookingForm(page, bookingProfile);
+      const submission = await submitBookingForm(
+        page,
+        autoSubmitBooking,
+        autofill,
+      );
+      manifest.autofill = autofill;
+      manifest.submission = submission;
+      manifest.attempts.push({
+        attempt,
+        selectedDate: slot.date.label,
+        selectedTime: slot.time.label,
+        slotTestId: slot.time.testId || null,
+        autofill,
+        submission,
+      });
+
+      if (!submission.safeToRetry) break;
+      attemptedSlotIds.add(
+        `${slot.date.testId}|${slot.time.testId || slot.time.label}`,
+      );
+    }
+    manifest.stoppedBeforeSubmission = !manifest.attempts.some(
+      (item) => item.submission.attempted,
     );
-    if ((await dateButton.count()) !== 1) {
-      throw new Error("Available date selector was not unique");
-    }
-    await dateButton.click();
-    manifest.selectedDate = firstDate.label;
-    await settle(page);
-
-    await captureStage(page, directory, "02-times");
-    manifest.stages.push("times");
-
-    const times = await availableTimeCandidates(page);
-    manifest.availableTimes = times;
-    const firstTime = times[0];
-    if (!firstTime) {
-      throw new Error("No enabled time button was identified after selecting a date");
-    }
-
-    const timeButton = page.getByRole("button", {
-      name: firstTime.label,
-      exact: true,
-    });
-    if ((await timeButton.count()) !== 1) {
-      throw new Error("Available time selector was not unique");
-    }
-    await timeButton.click();
-    manifest.selectedTime = firstTime.label;
-    await settle(page);
-
-    await captureStage(page, directory, "03-form");
-    manifest.stages.push("form");
-
-    // Capture artifacts before filling. Screenshots and HTML must never contain
-    // personal values supplied through BOOKING_PROFILE_JSON.
-    manifest.autofill = await autofillBookingForm(page, bookingProfile);
   } catch (error) {
     manifest.discoveryError = error.stack || error.message;
   } finally {
@@ -330,6 +601,9 @@ export async function captureAvailabilityFlow({
     selectedDate: manifest.selectedDate,
     selectedTime: manifest.selectedTime,
     autofill: manifest.autofill,
+    submission: manifest.submission,
+    attempts: manifest.attempts,
+    cookieConsentDismissed: manifest.cookieConsentDismissed,
     error: manifest.discoveryError || null,
   };
 }

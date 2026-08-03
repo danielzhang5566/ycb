@@ -76,6 +76,9 @@ jobs:
           # 20-30 second Playwright browser installation on every run.
           BROWSER_CHANNEL: chrome
           AUTO_FILL_BOOKING: "true"
+          # One-shot safety lock in the state artifact prevents another submit
+          # after any click attempt, including an uncertain result.
+          AUTO_SUBMIT_BOOKING: "true"
           BOOKING_PROFILE_JSON: ${{ secrets.BOOKING_PROFILE_JSON }}
           SECOND_CHECK_DELAY_SECONDS: "25"
         run: |
