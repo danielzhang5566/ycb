@@ -2,7 +2,8 @@ name: Monitor booking availability
 run-name: ${{ inputs.send_test_notification && 'Send ntfy test notification' || 'Check booking availability' }}
 
 on:
-  # cron-job.org calls this workflow_dispatch endpoint every 15 minutes.
+  # cron-job.org calls this workflow_dispatch endpoint every 2 minutes. Each
+  # run performs four checks whose start times are about 30 seconds apart.
   # GitHub's built-in schedule trigger is intentionally omitted to prevent
   # duplicate runs if its scheduler starts working again.
   workflow_dispatch:
@@ -80,12 +81,34 @@ jobs:
           # after any click attempt, including an uncertain result.
           AUTO_SUBMIT_BOOKING: "true"
           BOOKING_PROFILE_JSON: ${{ secrets.BOOKING_PROFILE_JSON }}
-          SECOND_CHECK_DELAY_SECONDS: "25"
+          CHECK_COUNT: "4"
+          CHECK_INTERVAL_SECONDS: "30"
         run: |
-          npm run check
-          echo "Waiting ${SECOND_CHECK_DELAY_SECONDS}s before the second check..."
-          sleep "$SECOND_CHECK_DELAY_SECONDS"
-          npm run check
+          for ((check_number = 1; check_number <= CHECK_COUNT; check_number++)); do
+            echo "Starting check ${check_number}/${CHECK_COUNT}..."
+            check_started_at="$(date +%s)"
+
+            npm run check
+
+            if jq -e '.bookingSubmission.attemptedAt? != null' \
+              .state/availability.json >/dev/null 2>&1; then
+              echo "A booking submission is locked; stopping this check loop."
+              break
+            fi
+
+            if (( check_number < CHECK_COUNT )); then
+              check_finished_at="$(date +%s)"
+              check_duration=$((check_finished_at - check_started_at))
+              sleep_seconds=$((CHECK_INTERVAL_SECONDS - check_duration))
+
+              if (( sleep_seconds > 0 )); then
+                echo "Check took ${check_duration}s; waiting ${sleep_seconds}s..."
+                sleep "$sleep_seconds"
+              else
+                echo "Check took ${check_duration}s; starting the next check immediately."
+              fi
+            fi
+          done
 
       - name: Save monitor state
         if: ${{ always() && !inputs.send_test_notification && hashFiles('.state/availability.json') != '' }}
