@@ -304,6 +304,38 @@ async function fillExactField(page, testId, value) {
   return true;
 }
 
+export async function ensureAustralianPhoneCountry(page) {
+  const phone = page.getByTestId("Q3");
+  if ((await phone.count()) !== 1 || !(await phone.isVisible())) return false;
+
+  if ((await phone.getAttribute("data-country")) === "au") return true;
+
+  const group = page.getByTestId("Q3_group");
+  const scope = (await group.count()) === 1 ? group : page.locator("body");
+  const selector = scope.locator(".selected-flag");
+  if ((await selector.count()) !== 1 || !(await selector.isVisible())) {
+    return false;
+  }
+
+  await selector.click();
+  const australia = scope.locator('[data-country-code="au"]');
+  if ((await australia.count()) !== 1 || !(await australia.isVisible())) {
+    return false;
+  }
+  await australia.click();
+  await page
+    .waitForFunction(
+      () =>
+        document.querySelector('[data-testid="Q3"]')?.dataset.country ===
+        "au",
+      undefined,
+      { timeout: 2_000 },
+    )
+    .catch(() => {});
+
+  return (await phone.getAttribute("data-country")) === "au";
+}
+
 function pushUnresolved(result, field, reason) {
   if (!result.unresolvedFields.some((item) => item.field === field)) {
     result.unresolvedFields.push({ field, reason });
@@ -345,6 +377,12 @@ export async function autofillBookingForm(page, profile) {
   for (const [profileField, testId] of Object.entries(EXACT_INPUT_FIELDS)) {
     if (!profile[profileField]) continue;
     try {
+      if (profileField === "phone") {
+        if (!(await ensureAustralianPhoneCountry(page))) {
+          pushUnresolved(result, "phoneCountry", "australia-not-selected");
+          continue;
+        }
+      }
       const value =
         profileField === "phone"
           ? normalizeAustralianMobile(profile[profileField])

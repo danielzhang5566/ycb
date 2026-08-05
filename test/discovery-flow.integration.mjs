@@ -5,7 +5,10 @@ import { join } from "node:path";
 
 import { chromium } from "playwright";
 
-import { captureAvailabilityFlow } from "../src/discovery-capture.mjs";
+import {
+  captureAvailabilityFlow,
+  submitBookingForm,
+} from "../src/discovery-capture.mjs";
 
 const artifactRoot = await mkdtemp(join(tmpdir(), "booking-discovery-test-"));
 const browser = await chromium.launch({ headless: true });
@@ -52,7 +55,12 @@ try {
                   <label for="arithmetic">為了證明您不是機器人，請回答：115 減 58 等於多少</label>
                   <select id="arithmetic" data-testid="Q11"><option>Please choose</option><option>57</option></select>
                   <label for="email">有效 Email</label><input id="email" data-testid="EMAIL" type="email">
-                  <label for="phone">澳洲手機號 Phone number</label><input id="phone" data-testid="Q3" type="tel">
+                  <label for="phone">澳洲手機號 Phone number</label>
+                  <div data-testid="Q3_group">
+                    <div class="flag-dropdown"><button class="selected-flag" type="button">Country</button></div>
+                    <ul><li data-country-code="au">Australia</li></ul>
+                    <input id="phone" data-testid="Q3" data-country="us" type="tel">
+                  </div>
                   <label for="visa">澳洲簽證號碼 Visa Grant No.</label><input id="visa" data-testid="Q10">
                   <label for="city">為了證明您不是機器人，哪一個是澳洲城市？</label>
                   <select id="city" data-testid="Q14"><option>Please choose</option><option>達爾文</option></select>
@@ -69,6 +77,9 @@ try {
                   headers: { "content-type": "application/json" },
                   body: JSON.stringify({ form: [] }),
                 });
+              });
+              document.querySelector('[data-country-code="au"]').addEventListener("click", () => {
+                document.querySelector('[data-testid="Q3"]').dataset.country = "au";
               });
             });
           });
@@ -138,12 +149,17 @@ try {
   );
   const formHtml = await readFile(join(result.directory, "03-form.html"), "utf8");
   assert.equal(formStructure.fields[0].label, "申請人護照中文姓名");
-  assert.equal(formStructure.buttons[0].text, "Confirm booking");
+  assert.equal(
+    formStructure.buttons.find((button) => button.testId === "confirm_button")
+      ?.text,
+    "Confirm booking",
+  );
   assert.equal(formHtml.includes("temporary-secret"), false);
   assert.equal(formHtml.includes("private-value"), false);
   assert.match(formHtml, /token=(?:%5B)?redacted(?:%5D)?/i);
   assert.equal(await page.locator("#passport-name").inputValue(), "Example Person");
   assert.equal(await page.locator("#phone").inputValue(), "+61400000000");
+  assert.equal(await page.locator("#phone").getAttribute("data-country"), "au");
   assert.equal(await page.locator("#travel-date").inputValue(), "23/01/2027");
   assert.equal(await page.locator("#arithmetic").inputValue(), "57");
   assert.equal(await page.locator("#city").inputValue(), "達爾文");
@@ -203,7 +219,7 @@ try {
                 <label for="en">申請人護照英文全名</label><input id="en" data-testid="LNAME">
                 <label for="math">為了證明您不是機器人，請回答：29 乘 23 等於多少</label><select id="math" data-testid="Q11"><option>Choose</option><option>667</option></select>
                 <label for="mail">有效 Email</label><input id="mail" data-testid="EMAIL">
-                <label for="phone2">澳洲手機號</label><input id="phone2" data-testid="Q3">
+                <label for="phone2">澳洲手機號</label><input id="phone2" data-testid="Q3" data-country="au">
                 <label for="visa2">Visa Grant No.</label><input id="visa2" data-testid="Q10">
                 <label for="city2">為了證明您不是機器人，哪一個是澳洲城市?</label><select id="city2" data-testid="Q14"><option>Choose</option><option>Darwin</option></select>
                 <label for="date2">預計入台旅遊日期</label><input id="date2" placeholder="DD/MM/YYYY">
@@ -269,6 +285,47 @@ try {
   assert.equal(retryManifest.attempts[1].selectedTime, "2:00 pm");
   assert.equal(retryManifest.attempts[1].submission.status, "confirmed");
   assert.equal(JSON.stringify(retryManifest).includes("retry-test-booking-id"), false);
+  await access(
+    join(retryResult.directory, "04-post-submit-attempt-1.diagnostics.json"),
+  );
+  await access(join(retryResult.directory, "04-post-submit-attempt-1.png"));
+  const failedSubmissionHtml = await readFile(
+    join(retryResult.directory, "04-post-submit-attempt-1.html"),
+    "utf8",
+  );
+  const failedSubmissionDiagnostics = await readFile(
+    join(retryResult.directory, "04-post-submit-attempt-1.diagnostics.json"),
+    "utf8",
+  );
+  assert.equal(
+    failedSubmissionDiagnostics.includes("person@example.com"),
+    false,
+  );
+  assert.equal(failedSubmissionDiagnostics.includes("+61400000000"), false);
+  assert.equal(failedSubmissionHtml.includes("person@example.com"), false);
+  assert.equal(failedSubmissionHtml.includes("Example Person"), false);
+  assert.equal(failedSubmissionHtml.includes("+61400000000"), false);
+
+  const blockedPage = await browser.newPage();
+  await blockedPage.setContent(`
+    <form>
+      <input data-testid="EMAIL" value="person@example.com" required>
+      <textarea name="g-recaptcha-response" style="display:none"></textarea>
+      <button data-testid="confirm_button" type="button">Confirm Booking</button>
+    </form>
+  `);
+  const blockedSubmission = await submitBookingForm(
+    blockedPage,
+    true,
+    { readyToSubmit: true },
+    100,
+  );
+  assert.equal(blockedSubmission.attempted, true);
+  assert.equal(blockedSubmission.apiRequestObserved, false);
+  assert.equal(blockedSubmission.status, "captcha-not-completed");
+  assert.equal(blockedSubmission.safeToRetry, true);
+  assert.equal(blockedSubmission.retryDifferentSlot, false);
+  assert.equal(blockedSubmission.diagnostics.beforeClick.formValid, true);
 
   console.log("Discovery flow integration test passed.");
 } finally {

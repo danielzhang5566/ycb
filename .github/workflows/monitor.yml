@@ -3,7 +3,8 @@ run-name: ${{ inputs.send_test_notification && 'Send ntfy test notification' || 
 
 on:
   # cron-job.org calls this workflow_dispatch endpoint every 2 minutes. Each
-  # run performs four checks whose start times are about 30 seconds apart.
+  # run checks for about 100 seconds. Start intervals use Melbourne time:
+  # weekdays 08:00-09:00 every 10s, 09:00-11:00 every 20s, otherwise every 30s.
   # GitHub's built-in schedule trigger is intentionally omitted to prevent
   # duplicate runs if its scheduler starts working again.
   workflow_dispatch:
@@ -77,36 +78,58 @@ jobs:
           # 20-30 second Playwright browser installation on every run.
           BROWSER_CHANNEL: chrome
           AUTO_FILL_BOOKING: "true"
-          # One-shot safety lock in the state artifact prevents another submit
-          # after any click attempt, including an uncertain result.
+          # A versioned safety lock prevents another submit only after a
+          # confirmed booking or an API request whose outcome is uncertain.
           AUTO_SUBMIT_BOOKING: "true"
           BOOKING_PROFILE_JSON: ${{ secrets.BOOKING_PROFILE_JSON }}
-          CHECK_COUNT: "4"
-          CHECK_INTERVAL_SECONDS: "30"
+          MONITOR_WINDOW_SECONDS: "100"
         run: |
-          for ((check_number = 1; check_number <= CHECK_COUNT; check_number++)); do
-            echo "Starting check ${check_number}/${CHECK_COUNT}..."
+          window_started_at="$(date +%s)"
+          check_number=0
+
+          while true; do
             check_started_at="$(date +%s)"
+            elapsed=$((check_started_at - window_started_at))
+            if (( check_number > 0 && elapsed > MONITOR_WINDOW_SECONDS )); then
+              break
+            fi
+
+            check_number=$((check_number + 1))
+            weekday="$(TZ=Australia/Melbourne date +%u)"
+            melbourne_hhmm_raw="$(TZ=Australia/Melbourne date +%H%M)"
+            melbourne_hhmm=$((10#$melbourne_hhmm_raw))
+            if (( weekday <= 5 && melbourne_hhmm >= 800 && melbourne_hhmm < 900 )); then
+              check_interval_seconds=10
+            elif (( weekday <= 5 && melbourne_hhmm >= 900 && melbourne_hhmm < 1100 )); then
+              check_interval_seconds=20
+            else
+              check_interval_seconds=30
+            fi
+
+            echo "Starting check ${check_number} at $(TZ=Australia/Melbourne date '+%F %T %Z'); target interval ${check_interval_seconds}s..."
 
             npm run check
 
-            if jq -e '.bookingSubmission.attemptedAt? != null' \
+            if jq -e '.bookingSubmission.version == 2 and .bookingSubmission.attemptedAt? != null' \
               .state/availability.json >/dev/null 2>&1; then
               echo "A booking submission is locked; stopping this check loop."
               break
             fi
 
-            if (( check_number < CHECK_COUNT )); then
-              check_finished_at="$(date +%s)"
-              check_duration=$((check_finished_at - check_started_at))
-              sleep_seconds=$((CHECK_INTERVAL_SECONDS - check_duration))
+            next_start_at=$((check_started_at + check_interval_seconds))
+            next_elapsed=$((next_start_at - window_started_at))
+            if (( next_elapsed > MONITOR_WINDOW_SECONDS )); then
+              break
+            fi
 
-              if (( sleep_seconds > 0 )); then
-                echo "Check took ${check_duration}s; waiting ${sleep_seconds}s..."
-                sleep "$sleep_seconds"
-              else
-                echo "Check took ${check_duration}s; starting the next check immediately."
-              fi
+            check_finished_at="$(date +%s)"
+            check_duration=$((check_finished_at - check_started_at))
+            sleep_seconds=$((next_start_at - check_finished_at))
+            if (( sleep_seconds > 0 )); then
+              echo "Check took ${check_duration}s; waiting ${sleep_seconds}s..."
+              sleep "$sleep_seconds"
+            else
+              echo "Check took ${check_duration}s; starting the next check immediately."
             fi
           done
 

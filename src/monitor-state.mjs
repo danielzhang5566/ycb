@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+export const SUBMISSION_LOCK_VERSION = 2;
+
 export const EMPTY_STATE = Object.freeze({
   schemaVersion: 1,
   status: "unknown",
@@ -14,6 +16,13 @@ export function availabilityFingerprint(dates) {
   return createHash("sha256")
     .update([...dates].sort().join("\n"))
     .digest("hex");
+}
+
+export function hasActiveSubmissionLock(state) {
+  return Boolean(
+    state?.bookingSubmission?.attemptedAt &&
+      state.bookingSubmission.version === SUBMISSION_LOCK_VERSION,
+  );
 }
 
 export function shouldNotify({

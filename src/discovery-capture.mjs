@@ -6,11 +6,21 @@ import { autofillBookingForm } from "./form-autofill.mjs";
 
 const TIME_LABEL = /\b\d{1,2}:\d{2}\s*(?:am|pm)\b/i;
 const DISCOVERY_CLICK_TIMEOUT_MS = 5_000;
-const SUBMISSION_CONFIRM_TIMEOUT_MS = 15_000;
+const SUBMISSION_CONFIRM_TIMEOUT_MS = 20_000;
 const MAX_SLOT_ATTEMPTS = 8;
 const UNAVAILABLE_SUBMISSION_CODES = new Set([
   "INTENT_UNAVAILABLE_TIME_SLOT",
   "BOOKING_SLOT_UNAVAILABLE",
+]);
+const CAPTCHA_SUBMISSION_CODES = new Set([
+  "BOOKING_CAPTCHA_FAILED",
+  "BOOKING_CAPTCHA_MISSING",
+]);
+const VALIDATION_SUBMISSION_CODES = new Set([
+  "INTENT_INVALID_SELECTIONS",
+  "INTENT_MISCONFIGURED",
+  "BOOKING_INVALID_ANSWER",
+  "BOOKING_INVALID_EMAIL",
 ]);
 
 export function shouldCaptureDiscovery(
@@ -47,6 +57,35 @@ export function sanitizedNetworkUrl(rawUrl) {
   }
 }
 
+export function sanitizedDiagnosticText(value) {
+  return String(value || "")
+    .replace(/https?:\/\/[^\s"'<>]+/gi, (rawUrl) => {
+      const safe = sanitizedNetworkUrl(rawUrl);
+      return `${safe.origin || "[redacted-origin]"}${safe.pathname}`;
+    })
+    .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, "[redacted-email]")
+    .replace(/\+?\d(?:[\s()-]*\d){7,}/g, "[redacted-number]")
+    .replace(/\b(?:itt|bkg|bok)_[0-9a-z-]+\b/gi, "[redacted-id]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 500);
+}
+
+function shouldRecordNetworkUrl(url, bookingOrigin) {
+  if (
+    url.origin === bookingOrigin ||
+    url.origin === "https://api.youcanbook.me"
+  ) {
+    return true;
+  }
+  return (
+    /recaptcha/i.test(url.pathname) &&
+    /(?:^|\.)google\.com$|(?:^|\.)recaptcha\.net$|(?:^|\.)gstatic\.com$/i.test(
+      url.hostname,
+    )
+  );
+}
+
 function fileSafeTimestamp(date) {
   return date.toISOString().replaceAll(":", "-").replaceAll(".", "-");
 }
@@ -63,8 +102,9 @@ export function attachNetworkRecorder(page, bookingUrl) {
   };
 
   page.on("request", (request) => {
+    const rawUrl = new URL(request.url());
+    if (!shouldRecordNetworkUrl(rawUrl, bookingOrigin)) return;
     const url = sanitizedNetworkUrl(request.url());
-    if (url.origin !== bookingOrigin) return;
     push({
       event: "request",
       at: new Date().toISOString(),
@@ -75,8 +115,9 @@ export function attachNetworkRecorder(page, bookingUrl) {
   });
 
   page.on("response", (response) => {
+    const rawUrl = new URL(response.url());
+    if (!shouldRecordNetworkUrl(rawUrl, bookingOrigin)) return;
     const url = sanitizedNetworkUrl(response.url());
-    if (url.origin !== bookingOrigin) return;
     push({
       event: "response",
       at: new Date().toISOString(),
@@ -87,12 +128,39 @@ export function attachNetworkRecorder(page, bookingUrl) {
     });
   });
 
+  page.on("requestfailed", (request) => {
+    const rawUrl = new URL(request.url());
+    if (!shouldRecordNetworkUrl(rawUrl, bookingOrigin)) return;
+    push({
+      event: "requestfailed",
+      at: new Date().toISOString(),
+      method: request.method(),
+      resourceType: request.resourceType(),
+      url: sanitizedNetworkUrl(request.url()),
+      error: sanitizedDiagnosticText(request.failure()?.errorText),
+    });
+  });
+
   return events;
 }
 
-async function sanitizedHtml(page) {
-  return page.evaluate(() => {
+async function sanitizedHtml(page, sensitiveValues = []) {
+  return page.evaluate((rawSensitiveValues) => {
     const root = document.documentElement.cloneNode(true);
+    const sensitiveValues = rawSensitiveValues
+      .map((value) => String(value || "").trim())
+      .filter((value) => value.length >= 2)
+      .sort((left, right) => right.length - left.length);
+
+    const redactText = (rawValue) => {
+      let value = String(rawValue || "");
+      for (const sensitiveValue of sensitiveValues) {
+        value = value.split(sensitiveValue).join("[redacted]");
+      }
+      return value
+        .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, "[redacted-email]")
+        .replace(/\+?\d(?:[\s()-]*\d){7,}/g, "[redacted-number]");
+    };
 
     const sanitizedUrl = (rawValue) => {
       try {
@@ -134,12 +202,20 @@ async function sanitizedHtml(page) {
           element.removeAttribute(attribute.name);
         } else if (/^(?:href|src|action|formaction|poster)$/i.test(attribute.name)) {
           element.setAttribute(attribute.name, sanitizedUrl(attribute.value));
+        } else {
+          element.setAttribute(attribute.name, redactText(attribute.value));
         }
       }
     });
 
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      node.nodeValue = redactText(node.nodeValue);
+    }
+
     return `<!doctype html>\n${root.outerHTML}`;
-  });
+  }, sensitiveValues);
 }
 
 async function pageStructure(page) {
@@ -259,14 +335,192 @@ async function settle(page) {
   await page.waitForTimeout(750);
 }
 
-async function submitBookingForm(page, enabled, autofill) {
+async function formSubmissionDiagnostics(page) {
+  const diagnostics = await page.evaluate(() => {
+    const visible = (element) => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return (
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        rect.width > 0 &&
+        rect.height > 0
+      );
+    };
+    const fields = [...document.querySelectorAll("input, textarea, select")]
+      .filter((field) => visible(field))
+      .slice(0, 80)
+      .map((field) => ({
+        testId: field.getAttribute("data-testid"),
+        type: field.getAttribute("type") || field.tagName.toLowerCase(),
+        required: field.required,
+        disabled: field.disabled,
+        nonEmpty: Boolean(field.value),
+        checked: "checked" in field ? field.checked : null,
+        valid: field.validity?.valid ?? null,
+        validationMessage: field.validationMessage || null,
+        ariaInvalid: field.getAttribute("aria-invalid"),
+        dataCountry: field.getAttribute("data-country"),
+      }));
+    const button = document.querySelector('[data-testid="confirm_button"]');
+    const captcha = document.querySelector(
+      'textarea[name="g-recaptcha-response"], input[name="g-recaptcha-response"]',
+    );
+    const errorTexts = [
+      ...document.querySelectorAll(
+        '[role="alert"], [aria-live="assertive"], .error, .form-error, [data-testid*="error"]',
+      ),
+    ]
+      .filter((element) => visible(element))
+      .map((element) => element.textContent || "")
+      .filter(Boolean)
+      .slice(0, 30);
+
+    return {
+      formValid: button?.closest("form")?.checkValidity() ?? null,
+      fields,
+      confirmButton: button
+        ? {
+            visible: visible(button),
+            disabled: button.disabled,
+            ariaDisabled: button.getAttribute("aria-disabled"),
+          }
+        : null,
+      captcha: {
+        fieldPresent: Boolean(captcha),
+        tokenPresent: Boolean(captcha?.value),
+        runtimePresent: Boolean(window.grecaptcha),
+        scriptCount: [...document.scripts].filter((script) =>
+          /recaptcha/i.test(script.src),
+        ).length,
+      },
+      errorTexts,
+    };
+  });
+  diagnostics.fields.forEach((field) => {
+    field.validationMessage = sanitizedDiagnosticText(field.validationMessage);
+  });
+  diagnostics.errorTexts = diagnostics.errorTexts.map(sanitizedDiagnosticText);
+  return diagnostics;
+}
+
+function redactDiagnosticData(value, sensitiveValues) {
+  if (Array.isArray(value)) {
+    return value.map((item) => redactDiagnosticData(item, sensitiveValues));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        redactDiagnosticData(item, sensitiveValues),
+      ]),
+    );
+  }
+  if (typeof value !== "string") return value;
+
+  let redacted = value;
+  for (const sensitiveValue of sensitiveValues) {
+    if (String(sensitiveValue || "").trim().length < 2) continue;
+    redacted = redacted.split(sensitiveValue).join("[redacted]");
+  }
+  return sanitizedDiagnosticText(redacted);
+}
+
+async function captureRedactedScreenshot(page, path, sensitiveValues) {
+  await page.evaluate((rawSensitiveValues) => {
+    const sensitiveValues = rawSensitiveValues
+      .map((value) => String(value || "").trim())
+      .filter((value) => value.length >= 2);
+    const sensitiveText = (value) => {
+      const text = String(value || "");
+      return (
+        sensitiveValues.some((candidate) => text.includes(candidate)) ||
+        /[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/.test(text) ||
+        /\+?\d(?:[\s()-]*\d){7,}/.test(text)
+      );
+    };
+    document.querySelectorAll("body *").forEach((element) => {
+      const directText = [...element.childNodes]
+        .filter((node) => node.nodeType === Node.TEXT_NODE)
+        .map((node) => node.nodeValue)
+        .join(" ");
+      if (sensitiveText(directText)) {
+        element.setAttribute("data-booking-monitor-sensitive", "true");
+      }
+    });
+  }, sensitiveValues);
+
+  try {
+    await page.screenshot({
+      path,
+      fullPage: true,
+      mask: [
+        page.locator("input, textarea, select"),
+        page.locator('[data-booking-monitor-sensitive="true"]'),
+      ],
+      maskColor: "#000000",
+    });
+  } finally {
+    await page
+      .locator('[data-booking-monitor-sensitive="true"]')
+      .evaluateAll((elements) =>
+        elements.forEach((element) =>
+          element.removeAttribute("data-booking-monitor-sensitive"),
+        ),
+      )
+      .catch(() => {});
+  }
+}
+
+async function captureDiagnosticStage(
+  page,
+  directory,
+  stage,
+  diagnostics,
+  bookingProfile,
+) {
+  const sensitiveValues = Object.values(bookingProfile || {});
+  await writeFile(
+    resolve(directory, `${stage}.html`),
+    await sanitizedHtml(page, sensitiveValues),
+  );
+  await writeJson(
+    resolve(directory, `${stage}.structure.json`),
+    redactDiagnosticData(await pageStructure(page), sensitiveValues),
+  );
+  await writeJson(
+    resolve(directory, `${stage}.diagnostics.json`),
+    redactDiagnosticData(diagnostics, sensitiveValues),
+  );
+  await captureRedactedScreenshot(
+    page,
+    resolve(directory, `${stage}.png`),
+    sensitiveValues,
+  );
+}
+
+export async function submitBookingForm(
+  page,
+  enabled,
+  autofill,
+  confirmTimeoutMs = SUBMISSION_CONFIRM_TIMEOUT_MS,
+) {
   const result = {
     enabled,
     attempted: false,
     confirmed: false,
     status: enabled ? "not-ready" : "disabled",
     safeToRetry: false,
+    retryDifferentSlot: false,
+    apiRequestObserved: false,
     observedResponses: [],
+    diagnostics: {
+      beforeClick: null,
+      afterClick: null,
+      requestFailures: [],
+      consoleEvents: [],
+      pageErrors: [],
+    },
   };
   if (!enabled || !autofill?.readyToSubmit) return result;
 
@@ -274,8 +528,64 @@ async function submitBookingForm(page, enabled, autofill) {
   const serverOutcome = new Promise((resolve) => {
     resolveOutcome = resolve;
   });
+  const requestHandler = (request) => {
+    let url;
+    try {
+      url = new URL(request.url());
+    } catch {
+      return;
+    }
+    if (
+      url.origin === "https://api.youcanbook.me" &&
+      url.pathname.startsWith("/v1/intents/") &&
+      ["GET", "PATCH", "POST"].includes(request.method())
+    ) {
+      result.apiRequestObserved = true;
+    }
+  };
+  const requestFailedHandler = (request) => {
+    let url;
+    try {
+      url = new URL(request.url());
+    } catch {
+      return;
+    }
+    if (
+      url.origin !== "https://api.youcanbook.me" &&
+      !/recaptcha/i.test(url.pathname)
+    ) {
+      return;
+    }
+    if (result.diagnostics.requestFailures.length < 30) {
+      result.diagnostics.requestFailures.push({
+        method: request.method(),
+        resourceType: request.resourceType(),
+        url: sanitizedNetworkUrl(request.url()),
+        error: sanitizedDiagnosticText(request.failure()?.errorText),
+      });
+    }
+  };
+  const consoleHandler = (message) => {
+    if (!["error", "warning"].includes(message.type())) return;
+    if (result.diagnostics.consoleEvents.length < 30) {
+      result.diagnostics.consoleEvents.push({
+        type: message.type(),
+        text: sanitizedDiagnosticText(message.text()),
+      });
+    }
+  };
+  const pageErrorHandler = (error) => {
+    if (result.diagnostics.pageErrors.length < 30) {
+      result.diagnostics.pageErrors.push(sanitizedDiagnosticText(error.message));
+    }
+  };
   const responseHandler = async (response) => {
-    const url = new URL(response.url());
+    let url;
+    try {
+      url = new URL(response.url());
+    } catch {
+      return;
+    }
     const method = response.request().method();
     if (
       url.origin !== "https://api.youcanbook.me" ||
@@ -299,7 +609,12 @@ async function submitBookingForm(page, enabled, autofill) {
         typeof body?.intentStatus === "string" ? body.intentStatus : null;
       summary.hasBookingId = Boolean(body?.bookingId);
       const serializedBody = JSON.stringify(body);
-      summary.errorCode = [...UNAVAILABLE_SUBMISSION_CODES].find((code) =>
+      const knownCodes = [
+        ...UNAVAILABLE_SUBMISSION_CODES,
+        ...CAPTCHA_SUBMISSION_CODES,
+        ...VALIDATION_SUBMISSION_CODES,
+      ];
+      summary.errorCode = knownCodes.find((code) =>
         serializedBody.includes(code),
       ) || null;
     } catch {
@@ -310,9 +625,19 @@ async function submitBookingForm(page, enabled, autofill) {
       result.observedResponses.push(summary);
     }
     if (summary.hasBookingId) resolveOutcome("confirmed");
-    if (summary.errorCode) resolveOutcome("unavailable");
+    if (UNAVAILABLE_SUBMISSION_CODES.has(summary.errorCode)) {
+      resolveOutcome("unavailable");
+    } else if (CAPTCHA_SUBMISSION_CODES.has(summary.errorCode)) {
+      resolveOutcome("captcha-failed");
+    } else if (VALIDATION_SUBMISSION_CODES.has(summary.errorCode)) {
+      resolveOutcome("validation-failed");
+    }
   };
 
+  page.on("request", requestHandler);
+  page.on("requestfailed", requestFailedHandler);
+  page.on("console", consoleHandler);
+  page.on("pageerror", pageErrorHandler);
   page.on("response", responseHandler);
   try {
     const button = page.getByTestId("confirm_button");
@@ -330,9 +655,12 @@ async function submitBookingForm(page, enabled, autofill) {
     });
     if (!formValid) {
       result.status = "form-invalid";
+      result.safeToRetry = true;
+      result.diagnostics.beforeClick = await formSubmissionDiagnostics(page);
       return result;
     }
 
+    result.diagnostics.beforeClick = await formSubmissionDiagnostics(page);
     result.attempted = true;
     await button.click({ timeout: DISCOVERY_CLICK_TIMEOUT_MS });
     const unavailableInPage = page
@@ -344,22 +672,45 @@ async function submitBookingForm(page, enabled, autofill) {
           );
         },
         undefined,
-        { timeout: SUBMISSION_CONFIRM_TIMEOUT_MS },
+        { timeout: confirmTimeoutMs },
       )
       .then(() => "unavailable")
       .catch(() => null);
     const outcome = await Promise.race([
       serverOutcome,
       unavailableInPage,
-      page.waitForTimeout(SUBMISSION_CONFIRM_TIMEOUT_MS).then(() => null),
+      page.waitForTimeout(confirmTimeoutMs).then(() => null),
     ]);
+    result.diagnostics.afterClick = await formSubmissionDiagnostics(page);
     result.confirmed = outcome === "confirmed";
-    result.status = outcome || "uncertain";
-    result.safeToRetry = outcome === "unavailable";
+    result.status =
+      outcome ||
+      (result.apiRequestObserved
+        ? "uncertain"
+        : result.diagnostics.afterClick?.captcha?.fieldPresent &&
+            !result.diagnostics.afterClick.captcha.tokenPresent
+          ? "captcha-not-completed"
+          : "not-submitted");
+    result.safeToRetry = [
+      "unavailable",
+      "captcha-failed",
+      "captcha-not-completed",
+      "validation-failed",
+      "not-submitted",
+    ].includes(result.status);
+    result.retryDifferentSlot = result.status === "unavailable";
   } catch (error) {
     result.status = "click-failed";
-    result.error = error.message;
+    result.safeToRetry = true;
+    result.error = sanitizedDiagnosticText(error.message);
+    result.diagnostics.afterClick = await formSubmissionDiagnostics(page).catch(
+      () => null,
+    );
   } finally {
+    page.off("request", requestHandler);
+    page.off("requestfailed", requestFailedHandler);
+    page.off("console", consoleHandler);
+    page.off("pageerror", pageErrorHandler);
     page.off("response", responseHandler);
   }
 
@@ -493,6 +844,7 @@ export async function captureAvailabilityFlow({
   bookingProfile,
   autoSubmitBooking = false,
   bookingUrl = new URL(page.url()).origin,
+  submissionConfirmTimeoutMs = SUBMISSION_CONFIRM_TIMEOUT_MS,
 }) {
   const directory = resolve(artifactRoot, fileSafeTimestamp(checkedAt));
   await mkdir(directory, { recursive: true });
@@ -531,13 +883,19 @@ export async function captureAvailabilityFlow({
       });
       useCurrentCalendar = false;
       if (!slot) {
-        if (manifest.attempts.some((item) => item.submission.safeToRetry)) {
+        if (
+          manifest.attempts.some(
+            (item) => item.submission.retryDifferentSlot,
+          )
+        ) {
           manifest.submission = {
             enabled: autoSubmitBooking,
             attempted: true,
             confirmed: false,
             status: "all-candidates-unavailable",
             safeToRetry: true,
+            retryDifferentSlot: false,
+            apiRequestObserved: true,
             observedResponses: manifest.attempts.flatMap(
               (item) => item.submission.observedResponses,
             ),
@@ -573,6 +931,7 @@ export async function captureAvailabilityFlow({
         page,
         autoSubmitBooking,
         autofill,
+        submissionConfirmTimeoutMs,
       );
       manifest.autofill = autofill;
       manifest.submission = submission;
@@ -585,7 +944,24 @@ export async function captureAvailabilityFlow({
         submission,
       });
 
-      if (!submission.safeToRetry) break;
+      if (submission.enabled && !submission.confirmed) {
+        const stage = `04-post-submit-attempt-${attempt}`;
+        await captureDiagnosticStage(
+          page,
+          directory,
+          stage,
+          {
+            status: submission.status,
+            apiRequestObserved: submission.apiRequestObserved,
+            observedResponses: submission.observedResponses,
+            ...submission.diagnostics,
+          },
+          bookingProfile,
+        );
+        manifest.stages.push(stage);
+      }
+
+      if (!submission.retryDifferentSlot) break;
       attemptedSlotIds.add(
         `${slot.date.testId}|${slot.time.testId || slot.time.label}`,
       );

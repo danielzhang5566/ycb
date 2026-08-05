@@ -3,7 +3,9 @@ import test from "node:test";
 
 import {
   EMPTY_STATE,
+  SUBMISSION_LOCK_VERSION,
   availabilityFingerprint,
+  hasActiveSubmissionLock,
   nextState,
   shouldNotify,
 } from "../src/monitor-state.mjs";
@@ -137,6 +139,7 @@ test("preserves notification metadata when no notification is sent", () => {
 
 test("preserves an automatic-submission lock across later state updates", () => {
   const bookingSubmission = {
+    version: SUBMISSION_LOCK_VERSION,
     attemptedAt: "2026-07-22T09:00:00.000Z",
     confirmed: true,
     status: "confirmed",
@@ -150,4 +153,24 @@ test("preserves an automatic-submission lock across later state updates", () => 
   });
 
   assert.deepEqual(result.bookingSubmission, bookingSubmission);
+});
+
+test("only the current submission-lock version is active", () => {
+  assert.equal(
+    hasActiveSubmissionLock({
+      bookingSubmission: {
+        version: SUBMISSION_LOCK_VERSION,
+        attemptedAt: "2026-07-22T09:00:00.000Z",
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    hasActiveSubmissionLock({
+      bookingSubmission: {
+        attemptedAt: "2026-07-22T09:00:00.000Z",
+      },
+    }),
+    false,
+  );
 });

@@ -4,6 +4,8 @@ import { chromium } from "playwright";
 
 import {
   EMPTY_STATE,
+  SUBMISSION_LOCK_VERSION,
+  hasActiveSubmissionLock,
   nextState,
   shouldNotify,
 } from "./monitor-state.mjs";
@@ -279,8 +281,17 @@ async function main() {
   }
 
   const checkedAt = new Date();
-  const previousState = await readState(config.stateFile);
-  if (config.autoSubmitBooking && previousState.bookingSubmission?.attemptedAt) {
+  let previousState = await readState(config.stateFile);
+  if (
+    previousState.bookingSubmission?.attemptedAt &&
+    !hasActiveSubmissionLock(previousState)
+  ) {
+    console.log(
+      "Ignoring and clearing an automatic-submission lock created by the older diagnostic logic.",
+    );
+    previousState = { ...previousState, bookingSubmission: null };
+  }
+  if (config.autoSubmitBooking && hasActiveSubmissionLock(previousState)) {
     console.log(
       JSON.stringify(
         {
@@ -337,6 +348,7 @@ async function main() {
     currentState = {
       ...currentState,
       bookingSubmission: {
+        version: SUBMISSION_LOCK_VERSION,
         attemptedAt: new Date().toISOString(),
         confirmed: submission.confirmed,
         status: submission.status,
@@ -346,7 +358,7 @@ async function main() {
     await sendSubmissionNotification(config, submission);
   } else if (submission?.safeToRetry) {
     console.log(
-      "The selected slot became unavailable; no submission lock was saved so later slots/runs can retry.",
+      `Submission status is ${submission.status}; no submission lock was saved so later runs can retry.`,
     );
   }
 
