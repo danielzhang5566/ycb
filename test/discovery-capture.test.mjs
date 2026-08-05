@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  maskedDiagnosticValue,
   sanitizedNetworkUrl,
   shouldCaptureDiscovery,
 } from "../src/discovery-capture.mjs";
@@ -9,6 +10,23 @@ import {
   EMPTY_STATE,
   availabilityFingerprint,
 } from "../src/monitor-state.mjs";
+
+test("masks diagnostic values while preserving useful formatting", () => {
+  assert.equal(
+    maskedDiagnosticValue("zeakhold@gmail.com", { type: "email" }),
+    "********@gmail.com",
+  );
+  assert.equal(
+    maskedDiagnosticValue("+61 486 312 947", {
+      type: "tel",
+      dataCountry: "au",
+    }),
+    "+61 *** *** ***",
+  );
+  assert.equal(maskedDiagnosticValue("2027-01-23"), "****-**-**");
+  assert.equal(maskedDiagnosticValue("Ziying Wang"), "****** ****");
+  assert.equal(maskedDiagnosticValue("王梓穎"), "***");
+});
 
 test("captures discovery when availability first appears", () => {
   assert.equal(

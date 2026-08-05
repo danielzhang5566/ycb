@@ -305,6 +305,22 @@ try {
   assert.equal(failedSubmissionHtml.includes("person@example.com"), false);
   assert.equal(failedSubmissionHtml.includes("Example Person"), false);
   assert.equal(failedSubmissionHtml.includes("+61400000000"), false);
+  assert.equal(failedSubmissionHtml.includes("******@example.com"), true);
+  assert.equal(failedSubmissionHtml.includes("******* ******"), true);
+  assert.equal(failedSubmissionHtml.includes("+61*********"), true);
+  const diagnosticData = JSON.parse(failedSubmissionDiagnostics);
+  const phoneDiagnostic = diagnosticData.afterClick.fields.find(
+    (field) => field.testId === "Q3",
+  );
+  const emailDiagnostic = diagnosticData.afterClick.fields.find(
+    (field) => field.testId === "EMAIL",
+  );
+  assert.equal(phoneDiagnostic.maskedValue, "+61*********");
+  assert.equal(phoneDiagnostic.digitCount, 11);
+  assert.equal(phoneDiagnostic.dataCountry, "au");
+  assert.equal(phoneDiagnostic.australianMobileFormatValid, true);
+  assert.equal(emailDiagnostic.maskedValue, "******@example.com");
+  assert.equal(emailDiagnostic.emailFormatValid, true);
 
   const blockedPage = await browser.newPage();
   await blockedPage.setContent(`

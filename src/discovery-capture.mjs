@@ -57,6 +57,25 @@ export function sanitizedNetworkUrl(rawUrl) {
   }
 }
 
+export function maskedDiagnosticValue(value, { type, dataCountry } = {}) {
+  const rawValue = String(value || "");
+  if (!rawValue) return "";
+
+  if (type === "email" || rawValue.includes("@")) {
+    const separator = rawValue.lastIndexOf("@");
+    if (separator > 0) {
+      const localPart = rawValue.slice(0, separator).replace(/[\p{L}\p{N}]/gu, "*");
+      return `${localPart}${rawValue.slice(separator)}`;
+    }
+  }
+
+  let masked = rawValue.replace(/[\p{L}\p{N}]/gu, "*");
+  if (rawValue.includes("+61")) {
+    masked = masked.replace("+**", "+61");
+  }
+  return masked;
+}
+
 export function sanitizedDiagnosticText(value) {
   return String(value || "")
     .replace(/https?:\/\/[^\s"'<>]+/gi, (rawUrl) => {
@@ -152,14 +171,42 @@ async function sanitizedHtml(page, sensitiveValues = []) {
       .filter((value) => value.length >= 2)
       .sort((left, right) => right.length - left.length);
 
+    const maskValue = (rawValue, { type, dataCountry } = {}) => {
+      const value = String(rawValue || "");
+      if (!value) return "";
+      if (type === "email" || value.includes("@")) {
+        const separator = value.lastIndexOf("@");
+        if (separator > 0) {
+          const localPart = value
+            .slice(0, separator)
+            .replace(/[\p{L}\p{N}]/gu, "*");
+          return `${localPart}${value.slice(separator)}`;
+        }
+      }
+      let masked = value.replace(/[\p{L}\p{N}]/gu, "*");
+      if (value.includes("+61")) {
+        masked = masked.replace("+**", "+61");
+      }
+      return masked;
+    };
+
     const redactText = (rawValue) => {
       let value = String(rawValue || "");
       for (const sensitiveValue of sensitiveValues) {
-        value = value.split(sensitiveValue).join("[redacted]");
+        value = value
+          .split(sensitiveValue)
+          .join(maskValue(sensitiveValue));
       }
       return value
-        .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, "[redacted-email]")
-        .replace(/\+?\d(?:[\s()-]*\d){7,}/g, "[redacted-number]");
+        .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, (email) =>
+          maskValue(email, { type: "email" }),
+        )
+        .replace(/\+?\d(?:[\s()-]*\d){7,}/g, (number) =>
+          maskValue(number, {
+            type: "tel",
+            dataCountry: number.includes("+61") ? "au" : null,
+          }),
+        );
     };
 
     const sanitizedUrl = (rawValue) => {
@@ -189,11 +236,57 @@ async function sanitizedHtml(page, sensitiveValues = []) {
       if (!script.src) script.textContent = "/* inline script removed */";
     });
 
-    root.querySelectorAll("input, textarea, select, option").forEach((field) => {
+    const originalFields = [
+      ...document.querySelectorAll("input, textarea, select"),
+    ];
+    const clonedFields = [...root.querySelectorAll("input, textarea, select")];
+    clonedFields.forEach((field, index) => {
+      const original = originalFields[index];
+      const type = (original?.getAttribute("type") || "").toLowerCase();
+      const isCaptcha = /captcha-response/i.test(
+        original?.getAttribute("name") || "",
+      );
       field.removeAttribute("value");
       field.removeAttribute("checked");
-      field.removeAttribute("selected");
-      if (field.tagName === "TEXTAREA") field.textContent = "";
+      if (field.tagName === "SELECT") {
+        field.querySelectorAll("option").forEach((option) =>
+          option.removeAttribute("selected"),
+        );
+      }
+
+      if (!original || type === "hidden" || isCaptcha) {
+        if (field.tagName === "TEXTAREA") field.textContent = "";
+        return;
+      }
+      if (["checkbox", "radio"].includes(type)) {
+        if (original.checked) field.setAttribute("checked", "");
+        return;
+      }
+      if (field.tagName === "SELECT") {
+        field.setAttribute(
+          "data-diagnostic-selected-index",
+          String(original.selectedIndex),
+        );
+        if (original.selectedIndex >= 0) {
+          field.options[original.selectedIndex]?.setAttribute("selected", "");
+        }
+        return;
+      }
+
+      const maskedValue = maskValue(original.value, {
+        type,
+        dataCountry: original.getAttribute("data-country"),
+      });
+      field.setAttribute(
+        "data-diagnostic-character-count",
+        String(original.value.length),
+      );
+      field.setAttribute(
+        "data-diagnostic-digit-count",
+        String((original.value.match(/\d/g) || []).length),
+      );
+      if (field.tagName === "TEXTAREA") field.textContent = maskedValue;
+      else field.setAttribute("value", maskedValue);
     });
 
     root.querySelectorAll("*").forEach((element) => {
@@ -337,6 +430,24 @@ async function settle(page) {
 
 async function formSubmissionDiagnostics(page) {
   const diagnostics = await page.evaluate(() => {
+    const maskValue = (rawValue, { type, dataCountry } = {}) => {
+      const value = String(rawValue || "");
+      if (!value) return "";
+      if (type === "email" || value.includes("@")) {
+        const separator = value.lastIndexOf("@");
+        if (separator > 0) {
+          const localPart = value
+            .slice(0, separator)
+            .replace(/[\p{L}\p{N}]/gu, "*");
+          return `${localPart}${value.slice(separator)}`;
+        }
+      }
+      let masked = value.replace(/[\p{L}\p{N}]/gu, "*");
+      if (value.includes("+61")) {
+        masked = masked.replace("+**", "+61");
+      }
+      return masked;
+    };
     const visible = (element) => {
       const style = getComputedStyle(element);
       const rect = element.getBoundingClientRect();
@@ -350,18 +461,48 @@ async function formSubmissionDiagnostics(page) {
     const fields = [...document.querySelectorAll("input, textarea, select")]
       .filter((field) => visible(field))
       .slice(0, 80)
-      .map((field) => ({
-        testId: field.getAttribute("data-testid"),
-        type: field.getAttribute("type") || field.tagName.toLowerCase(),
-        required: field.required,
-        disabled: field.disabled,
-        nonEmpty: Boolean(field.value),
-        checked: "checked" in field ? field.checked : null,
-        valid: field.validity?.valid ?? null,
-        validationMessage: field.validationMessage || null,
-        ariaInvalid: field.getAttribute("aria-invalid"),
-        dataCountry: field.getAttribute("data-country"),
-      }));
+      .map((field) => {
+        const type = field.getAttribute("type") || field.tagName.toLowerCase();
+        const dataCountry = field.getAttribute("data-country");
+        const testId = field.getAttribute("data-testid");
+        const isEmail =
+          type === "email" || testId === "EMAIL" || field.value.includes("@");
+        const compactPhone = field.value.replace(/[\s()-]/g, "");
+        return {
+          testId,
+          type,
+          required: field.required,
+          disabled: field.disabled,
+          nonEmpty: Boolean(field.value),
+          maskedValue: maskValue(field.value, { type, dataCountry }),
+          characterCount: field.value.length,
+          digitCount: (field.value.match(/\d/g) || []).length,
+          checked: "checked" in field ? field.checked : null,
+          selectedIndex:
+            field.tagName === "SELECT" ? field.selectedIndex : null,
+          placeholderSelected:
+            field.tagName === "SELECT"
+              ? field.selectedIndex <= 0 || !field.value
+              : null,
+          valid: field.validity?.valid ?? null,
+          validationMessage: field.validationMessage || null,
+          ariaInvalid: field.getAttribute("aria-invalid"),
+          dataCountry,
+          emailFormatValid:
+            isEmail
+              ? /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(field.value)
+              : null,
+          australianMobileFormatValid:
+            type === "tel" || dataCountry === "au"
+              ? /^(?:\+614\d{8}|04\d{8})$/.test(compactPhone)
+              : null,
+          isoDateFormat:
+            type === "date" || /^\d{4}-\d{2}-\d{2}$/.test(field.value)
+              ? /^\d{4}-\d{2}-\d{2}$/.test(field.value)
+              : null,
+          dayMonthYearFormat: /^\d{2}\/\d{2}\/\d{4}$/.test(field.value),
+        };
+      });
     const button = document.querySelector('[data-testid="confirm_button"]');
     const captcha = document.querySelector(
       'textarea[name="g-recaptcha-response"], input[name="g-recaptcha-response"]',
@@ -421,7 +562,9 @@ function redactDiagnosticData(value, sensitiveValues) {
   let redacted = value;
   for (const sensitiveValue of sensitiveValues) {
     if (String(sensitiveValue || "").trim().length < 2) continue;
-    redacted = redacted.split(sensitiveValue).join("[redacted]");
+    redacted = redacted
+      .split(sensitiveValue)
+      .join(maskedDiagnosticValue(sensitiveValue));
   }
   return sanitizedDiagnosticText(redacted);
 }
@@ -431,6 +574,22 @@ async function captureRedactedScreenshot(page, path, sensitiveValues) {
     const sensitiveValues = rawSensitiveValues
       .map((value) => String(value || "").trim())
       .filter((value) => value.length >= 2);
+    const maskValue = (rawValue, { type, dataCountry } = {}) => {
+      const value = String(rawValue || "");
+      if (!value) return "";
+      if (type === "email" || value.includes("@")) {
+        const separator = value.lastIndexOf("@");
+        if (separator > 0) {
+          const localPart = value
+            .slice(0, separator)
+            .replace(/[\p{L}\p{N}]/gu, "*");
+          return `${localPart}${value.slice(separator)}`;
+        }
+      }
+      let masked = value.replace(/[\p{L}\p{N}]/gu, "*");
+      if (value.includes("+61")) masked = masked.replace("+**", "+61");
+      return masked;
+    };
     const sensitiveText = (value) => {
       const text = String(value || "");
       return (
@@ -448,16 +607,71 @@ async function captureRedactedScreenshot(page, path, sensitiveValues) {
         element.setAttribute("data-booking-monitor-sensitive", "true");
       }
     });
+
+    document
+      .querySelectorAll("input, textarea, select")
+      .forEach((field) => {
+        const style = getComputedStyle(field);
+        const rect = field.getBoundingClientRect();
+        if (
+          style.display === "none" ||
+          style.visibility === "hidden" ||
+          rect.width <= 0 ||
+          rect.height <= 0
+        ) {
+          return;
+        }
+
+        const type = (field.getAttribute("type") || "").toLowerCase();
+        let displayValue;
+        if (["checkbox", "radio"].includes(type)) {
+          displayValue = field.checked ? "[checked]" : "[not checked]";
+        } else if (field.tagName === "SELECT") {
+          displayValue = `[selected option #${field.selectedIndex}]`;
+        } else {
+          displayValue =
+            maskValue(field.value, {
+              type,
+              dataCountry: field.getAttribute("data-country"),
+            }) || "[empty]";
+        }
+
+        const overlay = document.createElement("div");
+        overlay.setAttribute("data-booking-monitor-field-overlay", "true");
+        overlay.textContent = displayValue;
+        Object.assign(overlay.style, {
+          position: "absolute",
+          left: `${rect.left + scrollX}px`,
+          top: `${rect.top + scrollY}px`,
+          width: `${rect.width}px`,
+          height: `${rect.height}px`,
+          boxSizing: "border-box",
+          zIndex: "2147483647",
+          pointerEvents: "none",
+          overflow: "hidden",
+          whiteSpace: "pre-wrap",
+          display: "flex",
+          alignItems: field.tagName === "TEXTAREA" ? "flex-start" : "center",
+          padding: style.padding,
+          border: style.border,
+          borderRadius: style.borderRadius,
+          backgroundColor:
+            style.backgroundColor === "rgba(0, 0, 0, 0)"
+              ? "#ffffff"
+              : style.backgroundColor,
+          color: "#444444",
+          font: style.font,
+          letterSpacing: style.letterSpacing,
+        });
+        document.body.append(overlay);
+      });
   }, sensitiveValues);
 
   try {
     await page.screenshot({
       path,
       fullPage: true,
-      mask: [
-        page.locator("input, textarea, select"),
-        page.locator('[data-booking-monitor-sensitive="true"]'),
-      ],
+      mask: [page.locator('[data-booking-monitor-sensitive="true"]')],
       maskColor: "#000000",
     });
   } finally {
@@ -468,6 +682,10 @@ async function captureRedactedScreenshot(page, path, sensitiveValues) {
           element.removeAttribute("data-booking-monitor-sensitive"),
         ),
       )
+      .catch(() => {});
+    await page
+      .locator('[data-booking-monitor-field-overlay="true"]')
+      .evaluateAll((elements) => elements.forEach((element) => element.remove()))
       .catch(() => {});
   }
 }
