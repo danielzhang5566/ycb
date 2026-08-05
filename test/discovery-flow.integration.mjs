@@ -64,7 +64,7 @@ try {
                   <label for="visa">澳洲簽證號碼 Visa Grant No.</label><input id="visa" data-testid="Q10">
                   <label for="city">為了證明您不是機器人，哪一個是澳洲城市？</label>
                   <select id="city" data-testid="Q14"><option>Please choose</option><option>達爾文</option></select>
-                  <label for="travel-date">預計入台旅遊日期</label><input id="travel-date" placeholder="DD/MM/YYYY">
+                  <div data-testid="Q9"><label for="travel-date">預計入台旅遊日期</label><input id="travel-date" placeholder="DD/MM/YYYY"></div>
                   <label for="relatives">有無同行親屬</label>
                   <select id="relatives" data-testid="Q12"><option>Please choose</option><option value="是">是</option><option value="否">否</option></select>
                   <label for="relative-name">同行親屬人員資訊</label><input id="relative-name" data-testid="Q12-F1">
@@ -103,13 +103,15 @@ try {
     },
     networkEvents: [],
     bookingProfile: {
-      chineseName: "Example Chinese Name",
+      passportChineseName: "Example Chinese Name",
       passportEnglishName: "Example Person",
-      email: "person@example.com",
-      phone: "0400000000",
+      emailAddress: "person@example.com",
+      phoneNumber: "0400000000",
       visaGrantNumber: "0000000000000",
       plannedTaiwanTravelDate: "2027-01-23",
-      spouseName: "Example Spouse",
+      hasAccompanyingRelatives: "是",
+      accompanyingRelativeInfo: "婚姻 + Example Spouse",
+      declarationAccepted: "yes",
     },
     autoSubmitBooking: true,
   });
@@ -119,14 +121,15 @@ try {
   assert.equal(result.error, null);
   assert.equal(result.cookieConsentDismissed, true);
   assert.deepEqual(result.autofill.filledFields, [
-    "chineseName",
+    "passportChineseName",
     "passportEnglishName",
-    "email",
-    "phone",
+    "emailAddress",
+    "phoneNumber",
     "visaGrantNumber",
     "plannedTaiwanTravelDate",
-    "accompanyingRelatives",
-    "spouseName",
+    "hasAccompanyingRelatives",
+    "accompanyingRelativeInfo",
+    "declarationAccepted",
   ]);
   assert.equal(result.autofill.challengeFieldCount, 2);
   assert.equal(result.autofill.solvedChallengeCount, 2);
@@ -164,6 +167,10 @@ try {
   assert.equal(await page.locator("#arithmetic").inputValue(), "57");
   assert.equal(await page.locator("#city").inputValue(), "達爾文");
   assert.equal(await page.locator("#relatives").inputValue(), "是");
+  assert.equal(
+    await page.locator("#relative-name").inputValue(),
+    "婚姻 + Example Spouse",
+  );
   assert.equal(await page.locator("#declaration").isChecked(), true);
   assert.equal(formHtml.includes("Example Person"), false);
   assert.equal(formHtml.includes("person@example.com"), false);
@@ -222,7 +229,7 @@ try {
                 <label for="phone2">澳洲手機號</label><input id="phone2" data-testid="Q3" data-country="au">
                 <label for="visa2">Visa Grant No.</label><input id="visa2" data-testid="Q10">
                 <label for="city2">為了證明您不是機器人，哪一個是澳洲城市?</label><select id="city2" data-testid="Q14"><option>Choose</option><option>Darwin</option></select>
-                <label for="date2">預計入台旅遊日期</label><input id="date2" placeholder="DD/MM/YYYY">
+                <div data-testid="Q9"><label for="date2">預計入台旅遊日期</label><input id="date2" placeholder="DD/MM/YYYY"></div>
                 <label for="rel2">是否有同行親屬申請人員?</label><select id="rel2" data-testid="Q12"><option>Choose</option><option value="是">是</option><option value="否">否</option></select>
                 <div id="dependent"></div>
                 <label for="decl2">聲明</label><input id="decl2" data-testid="Q8" type="checkbox">
@@ -256,13 +263,15 @@ try {
     },
     networkEvents: [],
     bookingProfile: {
-      chineseName: "Example Chinese Name",
+      passportChineseName: "Example Chinese Name",
       passportEnglishName: "Example Person",
-      email: "person@example.com",
-      phone: "0400000000",
+      emailAddress: "person@example.com",
+      phoneNumber: "0400000000",
       visaGrantNumber: "0000000000000",
       plannedTaiwanTravelDate: "2027-01-23",
-      spouseName: "Example Spouse",
+      hasAccompanyingRelatives: "是",
+      accompanyingRelativeInfo: "婚姻 + Example Spouse",
+      declarationAccepted: "yes",
     },
     autoSubmitBooking: true,
   });
@@ -278,6 +287,10 @@ try {
   assert.equal(retryResult.submission.safeToRetry, false);
   assert.equal(retryResult.submission.status, "confirmed");
   assert.equal(retryResult.autofill.readyToSubmit, true);
+  assert.equal(
+    await retryPage.locator("#spouse2").inputValue(),
+    "婚姻 + Example Spouse",
+  );
   assert.equal(submissionCount, 2);
   assert.equal(retryManifest.attempts.length, 2);
   assert.equal(retryManifest.attempts[0].selectedTime, "1:30 pm");

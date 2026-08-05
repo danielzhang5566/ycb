@@ -1,4 +1,28 @@
 const PROFILE_FIELDS = [
+  "passportChineseName",
+  "passportEnglishName",
+  "emailAddress",
+  "phoneNumber",
+  "visaGrantNumber",
+  "plannedTaiwanTravelDate",
+  "hasAccompanyingRelatives",
+  "accompanyingRelativeInfo",
+  "declarationAccepted",
+];
+
+const PROFILE_TO_FORM_FIELD = Object.freeze({
+  passportChineseName: "FNAME",
+  passportEnglishName: "LNAME",
+  emailAddress: "EMAIL",
+  phoneNumber: "Q3",
+  visaGrantNumber: "Q10",
+  plannedTaiwanTravelDate: "Q9",
+  hasAccompanyingRelatives: "Q12",
+  accompanyingRelativeInfo: "Q12-F1",
+  declarationAccepted: "Q8",
+});
+
+const LEGACY_PROFILE_FIELDS = [
   "chineseName",
   "passportEnglishName",
   "email",
@@ -18,40 +42,22 @@ const PROFILE_FIELDS = [
   "spouseName",
 ];
 
-const DATE_FIELDS = [
+const REQUIRED_PROFILE_FIELDS = [
+  "passportChineseName",
+  "passportEnglishName",
+  "emailAddress",
+  "phoneNumber",
+  "visaGrantNumber",
   "plannedTaiwanTravelDate",
-  "dateOfBirth",
-  "passportIssueDate",
-  "passportExpiryDate",
-  "australianVisaExpiryDate",
+  "hasAccompanyingRelatives",
+  "declarationAccepted",
 ];
 
-const FIELD_RULES = {
-  chineseName:
-    /護照中文姓名|护照中文姓名|chinese\s*(?:full\s*)?name/i,
-  passportEnglishName:
-    /護照英文(?:全名|姓名)|护照英文(?:全名|姓名)|passport\s*(?:english\s*)?(?:full\s*)?name/i,
-  email: /(?:有效\s*)?(?:e-?mail|電子郵件|电子邮件|郵箱|邮箱)/i,
-  phone: /澳洲手機號|澳洲手机号|australian\s*(?:mobile|phone)|phone\s*number/i,
-  visaGrantNumber:
-    /澳洲簽證號碼|澳洲签证号码|visa\s*grant\s*(?:no|number)/i,
-  plannedTaiwanTravelDate:
-    /預計入台旅遊日期|预计入台旅游日期|planned.*taiwan.*(?:travel\s*)?date/i,
-};
-
-const EXACT_INPUT_FIELDS = {
-  chineseName: "FNAME",
-  passportEnglishName: "LNAME",
-  email: "EMAIL",
-  phone: "Q3",
-  visaGrantNumber: "Q10",
-};
-
-const REQUIRED_PROFILE_FIELDS = [
-  "chineseName",
+const INPUT_PROFILE_FIELDS = [
+  "passportChineseName",
   "passportEnglishName",
-  "email",
-  "phone",
+  "emailAddress",
+  "phoneNumber",
   "visaGrantNumber",
   "plannedTaiwanTravelDate",
 ];
@@ -139,6 +145,13 @@ export function normalizeAustralianMobile(value) {
   return compact;
 }
 
+export function formatAccompanyingRelativeInfo(spouseName) {
+  const value = String(spouseName || "").trim();
+  if (!value) return "";
+  if (/^婚姻\s*\+/u.test(value)) return value;
+  return `婚姻 + ${value}`;
+}
+
 function validIsoDate(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const date = new Date(`${value}T00:00:00Z`);
@@ -159,8 +172,12 @@ export function parseBookingProfile(rawProfile) {
     throw new Error("BOOKING_PROFILE_JSON must be a JSON object");
   }
 
+  const supportedFields = new Set([
+    ...PROFILE_FIELDS,
+    ...LEGACY_PROFILE_FIELDS,
+  ]);
   const unknownFields = Object.keys(parsed).filter(
-    (field) => !PROFILE_FIELDS.includes(field),
+    (field) => !supportedFields.has(field),
   );
   if (unknownFields.length > 0) {
     throw new Error(
@@ -168,9 +185,37 @@ export function parseBookingProfile(rawProfile) {
     );
   }
 
+  const hasReadableFields = PROFILE_FIELDS.some(
+    (field) => !LEGACY_PROFILE_FIELDS.includes(field) && field in parsed,
+  );
+  const hasLegacyFields = LEGACY_PROFILE_FIELDS.some(
+    (field) => !PROFILE_FIELDS.includes(field) && field in parsed,
+  );
+  if (hasReadableFields && hasLegacyFields) {
+    throw new Error(
+      "BOOKING_PROFILE_JSON cannot mix current profile keys with legacy profile keys",
+    );
+  }
+
+  const source = hasLegacyFields
+    ? {
+        passportChineseName: parsed.chineseName,
+        passportEnglishName: parsed.passportEnglishName,
+        emailAddress: parsed.email,
+        phoneNumber: parsed.phone,
+        visaGrantNumber: parsed.visaGrantNumber,
+        plannedTaiwanTravelDate: parsed.plannedTaiwanTravelDate,
+        hasAccompanyingRelatives: parsed.spouseName ? "是" : "否",
+        accompanyingRelativeInfo: parsed.spouseName
+          ? formatAccompanyingRelativeInfo(parsed.spouseName)
+          : undefined,
+        declarationAccepted: "yes",
+      }
+    : parsed;
+
   const profile = {};
   for (const field of PROFILE_FIELDS) {
-    const value = parsed[field];
+    const value = source[field];
     if (value === undefined || value === null || value === "") continue;
     if (typeof value !== "string") {
       throw new Error(`BOOKING_PROFILE_JSON field ${field} must be a string`);
@@ -178,12 +223,29 @@ export function parseBookingProfile(rawProfile) {
     profile[field] = value.trim();
   }
 
-  for (const field of DATE_FIELDS) {
-    if (profile[field] && !validIsoDate(profile[field])) {
-      throw new Error(
-        `BOOKING_PROFILE_JSON field ${field} must use YYYY-MM-DD`,
-      );
-    }
+  if (
+    profile.plannedTaiwanTravelDate &&
+    !validIsoDate(profile.plannedTaiwanTravelDate)
+  ) {
+    throw new Error(
+      "BOOKING_PROFILE_JSON field plannedTaiwanTravelDate must use YYYY-MM-DD",
+    );
+  }
+  if (
+    profile.hasAccompanyingRelatives &&
+    !/^(?:是|否|yes|no)$/i.test(profile.hasAccompanyingRelatives)
+  ) {
+    throw new Error(
+      "BOOKING_PROFILE_JSON field hasAccompanyingRelatives must be 是 or 否",
+    );
+  }
+  if (
+    profile.declarationAccepted &&
+    !/^(?:yes|true|是)$/i.test(profile.declarationAccepted)
+  ) {
+    throw new Error(
+      "BOOKING_PROFILE_JSON field declarationAccepted must confirm the declaration",
+    );
   }
 
   return Object.freeze(profile);
@@ -246,40 +308,6 @@ async function formFieldDescriptors(page) {
   });
 }
 
-function fieldScore(descriptor, pattern) {
-  if (pattern.test(descriptor.label)) return 100;
-  if (pattern.test(descriptor.ariaLabel)) return 90;
-  if (pattern.test(descriptor.placeholder)) return 80;
-  if (pattern.test(descriptor.name)) return 70;
-  if (pattern.test(descriptor.id)) return 60;
-  return 0;
-}
-
-function bestField(descriptors, pattern) {
-  const candidates = descriptors
-    .filter(
-      (field) =>
-        field.visible &&
-        !field.disabled &&
-        !["hidden", "submit", "button", "checkbox", "radio"].includes(
-          field.type,
-        ) &&
-        field.tag !== "select",
-    )
-    .map((field) => ({ field, score: fieldScore(field, pattern) }))
-    .filter(({ score }) => score > 0)
-    .sort((left, right) => right.score - left.score);
-
-  if (candidates.length === 0) return { status: "missing" };
-  if (
-    candidates.length > 1 &&
-    candidates[0].score === candidates[1].score
-  ) {
-    return { status: "ambiguous" };
-  }
-  return { status: "matched", field: candidates[0].field };
-}
-
 function normalizedOptionText(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
@@ -298,9 +326,25 @@ async function selectMatchingOption(select, predicate) {
 }
 
 async function fillExactField(page, testId, value) {
-  const locator = page.getByTestId(testId);
+  const testIdLocator = page.getByTestId(testId);
+  if ((await testIdLocator.count()) !== 1) return false;
+  const locator = await testIdLocator
+    .evaluate((element) => element.matches("input, textarea"))
+    .then((isInput) =>
+      isInput
+        ? testIdLocator
+        : testIdLocator.locator('input:not([type="hidden"]), textarea'),
+    );
   if ((await locator.count()) !== 1 || !(await locator.isVisible())) return false;
-  await locator.fill(value);
+  let formValue = value;
+  if (testId === "Q9") {
+    formValue = dateForField(value, {
+      type: (await locator.getAttribute("type")) || "",
+      placeholder: (await locator.getAttribute("placeholder")) || "",
+    });
+  }
+  await locator.fill(formValue);
+  if (testId === "Q9") await locator.blur();
   return true;
 }
 
@@ -374,17 +418,18 @@ export async function autofillBookingForm(page, profile) {
 
   const filled = new Set();
 
-  for (const [profileField, testId] of Object.entries(EXACT_INPUT_FIELDS)) {
+  for (const profileField of INPUT_PROFILE_FIELDS) {
     if (!profile[profileField]) continue;
+    const testId = PROFILE_TO_FORM_FIELD[profileField];
     try {
-      if (profileField === "phone") {
+      if (profileField === "phoneNumber") {
         if (!(await ensureAustralianPhoneCountry(page))) {
           pushUnresolved(result, "phoneCountry", "australia-not-selected");
           continue;
         }
       }
       const value =
-        profileField === "phone"
+        profileField === "phoneNumber"
           ? normalizeAustralianMobile(profile[profileField])
           : profile[profileField];
       if (await fillExactField(page, testId, value)) {
@@ -393,37 +438,6 @@ export async function autofillBookingForm(page, profile) {
       }
     } catch {
       pushUnresolved(result, profileField, "fill-failed");
-    }
-  }
-
-  const fields = page.locator("input, textarea, select");
-  for (const [profileField, pattern] of Object.entries(FIELD_RULES)) {
-    if (!profile[profileField] || filled.has(profileField)) continue;
-
-    const match = bestField(descriptors, pattern);
-    if (match.status !== "matched") {
-      pushUnresolved(result, profileField, match.status);
-      continue;
-    }
-
-    try {
-      const value =
-        profileField === "plannedTaiwanTravelDate"
-          ? dateForField(profile[profileField], match.field)
-          : profile[profileField];
-      await fields.nth(match.field.index).fill(value);
-      filled.add(profileField);
-      result.filledFields.push(profileField);
-    } catch {
-      pushUnresolved(result, profileField, "fill-failed");
-    }
-  }
-
-  for (const profileField of REQUIRED_PROFILE_FIELDS) {
-    if (!profile[profileField]) {
-      pushUnresolved(result, profileField, "profile-missing");
-    } else if (!filled.has(profileField)) {
-      pushUnresolved(result, profileField, "field-missing");
     }
   }
 
@@ -460,7 +474,9 @@ export async function autofillBookingForm(page, profile) {
 
   const relativesSelect = page.getByTestId("Q12");
   if ((await relativesSelect.count()) === 1) {
-    const hasAccompanyingRelative = Boolean(profile.spouseName);
+    const hasAccompanyingRelative = /^(?:是|yes)$/i.test(
+      profile.hasAccompanyingRelatives || "",
+    );
     const selected = await selectMatchingOption(
       relativesSelect,
       (label, value) => {
@@ -470,8 +486,12 @@ export async function autofillBookingForm(page, profile) {
           : /(?:^|\s)(?:否|no)(?:\s|$)/i.test(option);
       },
     );
-    if (selected) result.filledFields.push("accompanyingRelatives");
-    else pushUnresolved(result, "accompanyingRelatives", "option-missing");
+    if (selected) {
+      filled.add("hasAccompanyingRelatives");
+      result.filledFields.push("hasAccompanyingRelatives");
+    } else {
+      pushUnresolved(result, "hasAccompanyingRelatives", "option-missing");
+    }
     if (hasAccompanyingRelative && selected) {
       const relativeDetails = page.getByTestId("Q12-F1");
       const appeared = await relativeDetails
@@ -480,18 +500,25 @@ export async function autofillBookingForm(page, profile) {
         .catch(() => false);
       if (appeared && (await relativeDetails.count()) === 1) {
         try {
-          await relativeDetails.fill(profile.spouseName);
-          filled.add("spouseName");
-          result.filledFields.push("spouseName");
+          await relativeDetails.fill(profile.accompanyingRelativeInfo || "");
+          filled.add("accompanyingRelativeInfo");
+          result.filledFields.push("accompanyingRelativeInfo");
         } catch {
-          pushUnresolved(result, "spouseName", "fill-failed");
+          pushUnresolved(result, "accompanyingRelativeInfo", "fill-failed");
         }
       } else {
-        pushUnresolved(result, "spouseName", "field-missing");
+        pushUnresolved(result, "accompanyingRelativeInfo", "field-missing");
       }
     }
   } else {
-    pushUnresolved(result, "accompanyingRelatives", "field-missing");
+    pushUnresolved(result, "hasAccompanyingRelatives", "field-missing");
+  }
+
+  if (
+    /^(?:是|yes)$/i.test(profile.hasAccompanyingRelatives || "") &&
+    !profile.accompanyingRelativeInfo
+  ) {
+    pushUnresolved(result, "accompanyingRelativeInfo", "profile-missing");
   }
 
   const declaration = page.getByTestId("Q8");
@@ -499,11 +526,23 @@ export async function autofillBookingForm(page, profile) {
     try {
       await declaration.check();
       result.declarationAccepted = await declaration.isChecked();
+      if (result.declarationAccepted) {
+        filled.add("declarationAccepted");
+        result.filledFields.push("declarationAccepted");
+      }
     } catch {
       pushUnresolved(result, "declaration", "check-failed");
     }
   } else {
-    pushUnresolved(result, "declaration", "field-missing");
+    pushUnresolved(result, "declarationAccepted", "field-missing");
+  }
+
+  for (const profileField of REQUIRED_PROFILE_FIELDS) {
+    if (!profile[profileField]) {
+      pushUnresolved(result, profileField, "profile-missing");
+    } else if (!filled.has(profileField)) {
+      pushUnresolved(result, profileField, "field-missing");
+    }
   }
 
   if (result.challengeFieldCount !== result.solvedChallengeCount) {

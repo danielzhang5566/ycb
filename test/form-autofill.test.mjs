@@ -2,11 +2,23 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  formatAccompanyingRelativeInfo,
   parseArithmeticChallenge,
   parseBookingProfile,
   normalizeAustralianMobile,
   solveArithmeticChallenge,
 } from "../src/form-autofill.mjs";
+
+test("formats spouse details as relationship plus Chinese name", () => {
+  assert.equal(
+    formatAccompanyingRelativeInfo("張志豪"),
+    "婚姻 + 張志豪",
+  );
+  assert.equal(
+    formatAccompanyingRelativeInfo("婚姻 + 張志豪"),
+    "婚姻 + 張志豪",
+  );
+});
 
 test("normalizes an Australian local mobile number to E.164", () => {
   assert.equal(normalizeAustralianMobile("0486 123 456"), "+61486123456");
@@ -38,19 +50,59 @@ test("parses and solves a Traditional Chinese multiplication challenge", () => {
   assert.equal(solveArithmeticChallenge(challenge), 667);
 });
 
-test("parses only supported booking profile fields", () => {
+test("parses readable booking profile keys", () => {
   assert.deepEqual(
     parseBookingProfile(
       JSON.stringify({
+        passportChineseName: "Example Chinese Name",
         passportEnglishName: "Example Person",
-        email: "person@example.com",
+        emailAddress: "person@example.com",
+        phoneNumber: "+61400000000",
+        visaGrantNumber: "0000000000000",
         plannedTaiwanTravelDate: "2027-01-23",
+        hasAccompanyingRelatives: "是",
+        accompanyingRelativeInfo: "婚姻 + Example Spouse",
+        declarationAccepted: "yes",
       }),
     ),
     {
+      passportChineseName: "Example Chinese Name",
       passportEnglishName: "Example Person",
-      email: "person@example.com",
+      emailAddress: "person@example.com",
+      phoneNumber: "+61400000000",
+      visaGrantNumber: "0000000000000",
       plannedTaiwanTravelDate: "2027-01-23",
+      hasAccompanyingRelatives: "是",
+      accompanyingRelativeInfo: "婚姻 + Example Spouse",
+      declarationAccepted: "yes",
+    },
+  );
+});
+
+test("converts the old profile shape to current readable keys", () => {
+  assert.deepEqual(
+    parseBookingProfile(
+      JSON.stringify({
+        chineseName: "Example Chinese Name",
+        passportEnglishName: "Example Person",
+        email: "person@example.com",
+        phone: "0400000000",
+        plannedTaiwanTravelDate: "2027-01-23",
+        visaGrantNumber: "0000000000000",
+        spouseName: "Example Spouse",
+        passportNumber: "IGNORED-BECAUSE-NOT-ON-FORM",
+      }),
+    ),
+    {
+      passportChineseName: "Example Chinese Name",
+      passportEnglishName: "Example Person",
+      emailAddress: "person@example.com",
+      phoneNumber: "0400000000",
+      visaGrantNumber: "0000000000000",
+      plannedTaiwanTravelDate: "2027-01-23",
+      hasAccompanyingRelatives: "是",
+      accompanyingRelativeInfo: "婚姻 + Example Spouse",
+      declarationAccepted: "yes",
     },
   );
 });
@@ -70,7 +122,7 @@ test("rejects unsupported fields without printing their values", () => {
   );
 });
 
-test("requires an ISO travel date", () => {
+test("requires an ISO planned travel date", () => {
   assert.throws(
     () =>
       parseBookingProfile(
@@ -80,20 +132,15 @@ test("requires an ISO travel date", () => {
   );
 });
 
-test("preserves supported profile fields that do not have a form mapping yet", () => {
-  const profile = parseBookingProfile(
-    JSON.stringify({
-      chineseName: "Example Name",
-      dateOfBirth: "1990-01-02",
-      passportNumber: "EXAMPLE123",
-      overseasAddress: "Example address",
-      entryPermitValidity: "one_year_single_entry",
-      maritalStatus: "married",
-      spouseName: "Example Spouse",
-    }),
+test("rejects mixing current and legacy profile keys", () => {
+  assert.throws(
+    () =>
+      parseBookingProfile(
+        JSON.stringify({
+          passportChineseName: "Example",
+          email: "person@example.com",
+        }),
+      ),
+    /cannot mix/,
   );
-
-  assert.equal(profile.passportNumber, "EXAMPLE123");
-  assert.equal(profile.entryPermitValidity, "one_year_single_entry");
-  assert.equal(profile.spouseName, "Example Spouse");
 });
