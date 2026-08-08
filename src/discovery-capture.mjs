@@ -467,7 +467,11 @@ async function formSubmissionDiagnostics(page) {
         const testId = field.getAttribute("data-testid");
         const isEmail =
           type === "email" || testId === "EMAIL" || field.value.includes("@");
-        const compactPhone = field.value.replace(/[\s()-]/g, "");
+        const compactPhone = field.value.replace(/[\s()\-\p{Cf}]/gu, "");
+        const selectedOption =
+          field.tagName === "SELECT" && field.selectedIndex >= 0
+            ? field.options[field.selectedIndex]
+            : null;
         return {
           testId,
           type,
@@ -482,7 +486,11 @@ async function formSubmissionDiagnostics(page) {
             field.tagName === "SELECT" ? field.selectedIndex : null,
           placeholderSelected:
             field.tagName === "SELECT"
-              ? field.selectedIndex <= 0 || !field.value
+              ? !field.value ||
+                Boolean(selectedOption?.disabled) ||
+                /please\s+(?:choose|select)|select\s+an?\s+option/i.test(
+                  selectedOption?.textContent || "",
+                )
               : null,
           valid: field.validity?.valid ?? null,
           validationMessage: field.validationMessage || null,
@@ -494,7 +502,7 @@ async function formSubmissionDiagnostics(page) {
               : null,
           australianMobileFormatValid:
             type === "tel" || dataCountry === "au"
-              ? /^(?:\+614\d{8}|04\d{8})$/.test(compactPhone)
+              ? /^(?:\+614\d{8}|04\d{8}|4\d{8})$/.test(compactPhone)
               : null,
           isoDateFormat:
             type === "date" || /^\d{4}-\d{2}-\d{2}$/.test(field.value)
@@ -509,7 +517,7 @@ async function formSubmissionDiagnostics(page) {
     );
     const errorTexts = [
       ...document.querySelectorAll(
-        '[role="alert"], [aria-live="assertive"], .error, .form-error, [data-testid*="error"]',
+        '[role="alert"], [aria-live="assertive"], [data-teststatus="error"], .error, .form-error, [data-testid*="error"]',
       ),
     ]
       .filter((element) => visible(element))
@@ -894,18 +902,65 @@ export async function submitBookingForm(
       )
       .then(() => "unavailable")
       .catch(() => null);
+    const validationErrorInPage = page
+      .waitForFunction(
+        () => {
+          const visible = (element) => {
+            const style = window.getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            return (
+              style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              rect.width > 0 &&
+              rect.height > 0
+            );
+          };
+          if (
+            [
+              ...document.querySelectorAll(
+                'input.invalid-number, select.invalid-number, [aria-invalid="true"]',
+              ),
+            ].some(visible)
+          ) {
+            return true;
+          }
+          return [
+            ...document.querySelectorAll(
+              '[role="alert"], [aria-live="assertive"], [data-teststatus="error"], .error, .form-error, [data-testid*="error"]',
+            ),
+          ].some(
+            (element) =>
+              visible(element) && Boolean((element.textContent || "").trim()),
+          );
+        },
+        undefined,
+        { timeout: confirmTimeoutMs },
+      )
+      .then(() => "validation-failed")
+      .catch(() => null);
     const outcome = await Promise.race([
       serverOutcome,
       unavailableInPage,
+      validationErrorInPage,
       page.waitForTimeout(confirmTimeoutMs).then(() => null),
     ]);
     result.diagnostics.afterClick = await formSubmissionDiagnostics(page);
     result.confirmed = outcome === "confirmed";
+    const hasVisibleValidationErrors =
+      result.diagnostics.afterClick?.errorTexts?.length > 0 ||
+      result.diagnostics.afterClick?.fields?.some(
+        (field) =>
+          field.valid === false ||
+          field.ariaInvalid === "true" ||
+          field.australianMobileFormatValid === false,
+      );
     result.status =
       outcome ||
       (result.apiRequestObserved
         ? "uncertain"
-        : result.diagnostics.afterClick?.captcha?.fieldPresent &&
+        : hasVisibleValidationErrors
+          ? "validation-failed"
+          : result.diagnostics.afterClick?.captcha?.fieldPresent &&
             !result.diagnostics.afterClick.captcha.tokenPresent
           ? "captcha-not-completed"
           : "not-submitted");

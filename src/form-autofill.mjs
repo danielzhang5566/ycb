@@ -139,9 +139,18 @@ export function solveArithmeticChallenge(challenge) {
 }
 
 export function normalizeAustralianMobile(value) {
-  const compact = String(value || "").replace(/[\s()-]/g, "");
+  const compact = String(value || "").replace(/[\s()\-\p{Cf}]/gu, "");
   if (/^04\d{8}$/.test(compact)) return `+61${compact.slice(1)}`;
   if (/^614\d{8}$/.test(compact)) return `+${compact}`;
+  if (/^4\d{8}$/.test(compact)) return `+61${compact}`;
+  return compact;
+}
+
+export function australianNationalMobileNumber(value) {
+  const compact = String(value || "").replace(/[\s()\-\p{Cf}]/gu, "");
+  if (/^\+614\d{8}$/.test(compact)) return compact.slice(3);
+  if (/^614\d{8}$/.test(compact)) return compact.slice(2);
+  if (/^04\d{8}$/.test(compact)) return compact.slice(1);
   return compact;
 }
 
@@ -344,8 +353,30 @@ async function fillExactField(page, testId, value) {
     });
   }
   await locator.fill(formValue);
-  if (testId === "Q9") await locator.blur();
+  if (["Q3", "Q9"].includes(testId)) await locator.blur();
   return true;
+}
+
+async function australianPhoneFieldIsValid(page) {
+  const phone = page.getByTestId("Q3");
+  if ((await phone.count()) !== 1) return false;
+  await page.waitForTimeout(100);
+  const state = await phone.evaluate((element) => {
+    const compact = element.value.replace(/[\s()\-\p{Cf}]/gu, "");
+    const group = element.closest('[data-testid="Q3_group"]');
+    return {
+      country: element.getAttribute("data-country"),
+      nationalFormatValid: /^4\d{8}$/.test(compact),
+      markedInvalid:
+        element.classList.contains("invalid-number") ||
+        /please enter a valid telephone number/i.test(group?.textContent || ""),
+    };
+  });
+  return (
+    state.country === "au" &&
+    state.nationalFormatValid &&
+    !state.markedInvalid
+  );
 }
 
 export async function ensureAustralianPhoneCountry(page) {
@@ -430,9 +461,16 @@ export async function autofillBookingForm(page, profile) {
       }
       const value =
         profileField === "phoneNumber"
-          ? normalizeAustralianMobile(profile[profileField])
+          ? australianNationalMobileNumber(profile[profileField])
           : profile[profileField];
       if (await fillExactField(page, testId, value)) {
+        if (
+          profileField === "phoneNumber" &&
+          !(await australianPhoneFieldIsValid(page))
+        ) {
+          pushUnresolved(result, profileField, "invalid-australian-mobile");
+          continue;
+        }
         filled.add(profileField);
         result.filledFields.push(profileField);
       }

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  australianNationalMobileNumber,
   formatAccompanyingRelativeInfo,
   parseArithmeticChallenge,
   parseBookingProfile,
@@ -24,6 +25,19 @@ test("normalizes an Australian local mobile number to E.164", () => {
   assert.equal(normalizeAustralianMobile("0486 123 456"), "+61486123456");
   assert.equal(normalizeAustralianMobile("61486123456"), "+61486123456");
   assert.equal(normalizeAustralianMobile("+61486123456"), "+61486123456");
+  assert.equal(normalizeAustralianMobile("486123456"), "+61486123456");
+  assert.equal(normalizeAustralianMobile("\u200e+61486123456"), "+61486123456");
+});
+
+test("converts Australian mobile formats to the national digits expected by the form", () => {
+  assert.equal(australianNationalMobileNumber("+61486123456"), "486123456");
+  assert.equal(australianNationalMobileNumber("61486123456"), "486123456");
+  assert.equal(australianNationalMobileNumber("0486123456"), "486123456");
+  assert.equal(australianNationalMobileNumber("486123456"), "486123456");
+  assert.equal(
+    australianNationalMobileNumber("\u200e+61 486 123 456"),
+    "486123456",
+  );
 });
 
 test("parses and solves a Traditional Chinese subtraction challenge", () => {

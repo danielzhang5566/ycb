@@ -161,7 +161,7 @@ try {
   assert.equal(formHtml.includes("private-value"), false);
   assert.match(formHtml, /token=(?:%5B)?redacted(?:%5D)?/i);
   assert.equal(await page.locator("#passport-name").inputValue(), "Example Person");
-  assert.equal(await page.locator("#phone").inputValue(), "+61400000000");
+  assert.equal(await page.locator("#phone").inputValue(), "400000000");
   assert.equal(await page.locator("#phone").getAttribute("data-country"), "au");
   assert.equal(await page.locator("#travel-date").inputValue(), "23/01/2027");
   assert.equal(await page.locator("#arithmetic").inputValue(), "57");
@@ -230,16 +230,11 @@ try {
                 <label for="visa2">Visa Grant No.</label><input id="visa2" data-testid="Q10">
                 <label for="city2">為了證明您不是機器人，哪一個是澳洲城市?</label><select id="city2" data-testid="Q14"><option>Choose</option><option>Darwin</option></select>
                 <div data-testid="Q9"><label for="date2">預計入台旅遊日期</label><input id="date2" placeholder="DD/MM/YYYY"></div>
-                <label for="rel2">是否有同行親屬申請人員?</label><select id="rel2" data-testid="Q12"><option>Choose</option><option value="是">是</option><option value="否">否</option></select>
-                <div id="dependent"></div>
+                <label for="rel2">是否有同行親屬申請人員?</label><select id="rel2" data-testid="Q12"><option value="是">是</option><option value="否">否</option></select>
+                <div id="dependent"><label for="spouse2">同行親屬人員資訊</label><input id="spouse2" data-testid="Q12-F1"></div>
                 <label for="decl2">聲明</label><input id="decl2" data-testid="Q8" type="checkbox">
                 <button data-testid="confirm_button" type="button">Confirm Booking</button>
               </form>\`;
-            document.querySelector('[data-testid="Q12"]').onchange = (event) => {
-              document.querySelector("#dependent").innerHTML = event.target.value === "是"
-                ? '<label for="spouse2">同行親屬人員資訊</label><input id="spouse2" data-testid="Q12-F1">'
-                : '';
-            };
             document.querySelector('[data-testid="confirm_button"]').onclick = () => {
               fetch('https://api.youcanbook.me/v1/intents/itt_' + slot + '/selections', {
                 method: 'PATCH', headers: {'content-type': 'application/json'}, body: '{}'
@@ -314,13 +309,13 @@ try {
     failedSubmissionDiagnostics.includes("person@example.com"),
     false,
   );
-  assert.equal(failedSubmissionDiagnostics.includes("+61400000000"), false);
+  assert.equal(failedSubmissionDiagnostics.includes("400000000"), false);
   assert.equal(failedSubmissionHtml.includes("person@example.com"), false);
   assert.equal(failedSubmissionHtml.includes("Example Person"), false);
-  assert.equal(failedSubmissionHtml.includes("+61400000000"), false);
+  assert.equal(failedSubmissionHtml.includes("400000000"), false);
   assert.equal(failedSubmissionHtml.includes("******@example.com"), true);
   assert.equal(failedSubmissionHtml.includes("******* ******"), true);
-  assert.equal(failedSubmissionHtml.includes("+61*********"), true);
+  assert.equal(failedSubmissionHtml.includes("*********"), true);
   const diagnosticData = JSON.parse(failedSubmissionDiagnostics);
   const phoneDiagnostic = diagnosticData.afterClick.fields.find(
     (field) => field.testId === "Q3",
@@ -328,12 +323,52 @@ try {
   const emailDiagnostic = diagnosticData.afterClick.fields.find(
     (field) => field.testId === "EMAIL",
   );
-  assert.equal(phoneDiagnostic.maskedValue, "+61*********");
-  assert.equal(phoneDiagnostic.digitCount, 11);
+  assert.equal(phoneDiagnostic.maskedValue, "*********");
+  assert.equal(phoneDiagnostic.digitCount, 9);
   assert.equal(phoneDiagnostic.dataCountry, "au");
   assert.equal(phoneDiagnostic.australianMobileFormatValid, true);
   assert.equal(emailDiagnostic.maskedValue, "******@example.com");
   assert.equal(emailDiagnostic.emailFormatValid, true);
+  const relativesDiagnostic = diagnosticData.afterClick.fields.find(
+    (field) => field.testId === "Q12",
+  );
+  assert.equal(relativesDiagnostic.selectedIndex, 0);
+  assert.equal(relativesDiagnostic.placeholderSelected, false);
+
+  const validationPage = await browser.newPage();
+  await validationPage.setContent(`
+    <form>
+      <input data-testid="Q3" data-country="au" value="486312947">
+      <textarea name="g-recaptcha-response" style="display:none"></textarea>
+      <button data-testid="confirm_button" type="button">Confirm Booking</button>
+    </form>
+    <script>
+      document.querySelector('[data-testid="confirm_button"]').onclick = () => {
+        const phone = document.querySelector('[data-testid="Q3"]');
+        phone.classList.add('invalid-number');
+        const error = document.createElement('span');
+        error.dataset.teststatus = 'error';
+        error.textContent = 'Please enter a valid telephone number';
+        phone.after(error);
+      };
+    </script>
+  `);
+  const validationSubmission = await submitBookingForm(
+    validationPage,
+    true,
+    { readyToSubmit: true },
+    1_000,
+  );
+  assert.equal(validationSubmission.attempted, true);
+  assert.equal(validationSubmission.apiRequestObserved, false);
+  assert.equal(validationSubmission.status, "validation-failed");
+  assert.equal(validationSubmission.safeToRetry, true);
+  assert.equal(
+    validationSubmission.diagnostics.afterClick.errorTexts.includes(
+      "Please enter a valid telephone number",
+    ),
+    true,
+  );
 
   const blockedPage = await browser.newPage();
   await blockedPage.setContent(`
